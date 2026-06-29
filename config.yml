@@ -1,0 +1,61 @@
+# cloudperfeval configuration.
+
+# --- Where to run `docker ...` commands (the Swarm manager) ---
+# "localhost" -> run docker here (you are on a manager node)
+# any host    -> SSH into that host for manager-level docker commands
+manager_host: localhost
+ssh_user: varuncg
+ssh_key_path: ~/.ssh/id_rsa
+
+# --- The Swarm stack that holds the services ---
+# Services deployed via `docker stack deploy -c <file> <stack>` are named
+# "<stack>_<service>". Set this so short names ("frontend") resolve.
+stack_name: sn
+
+# --- Telemetry + app entrypoints (published host ports) ---
+prometheus_url: http://node-14.perfdebug.ragger-pg0.apt.emulab.net:9090
+jaeger_url: http://node-13.perfdebug.ragger-pg0.apt.emulab.net:16686
+frontend_url: http://node-0.perfdebug.ragger-pg0.apt.emulab.net:12345
+
+# --- Per-suite deployment profiles (applied when a problem is loaded) ---
+suites:
+  socialnet:
+    stack_name: sn
+    frontend_url: http://node-0.perfdebug.ragger-pg0.apt.emulab.net:12345
+    jaeger_url: http://node-13.perfdebug.ragger-pg0.apt.emulab.net:16686
+    prometheus_url: http://node-14.perfdebug.ragger-pg0.apt.emulab.net:9090
+
+# --- Fault injection (Pumba) ---
+# Pumba runs on the node hosting the faulted task. To reach worker nodes over
+# SSH, either provide an explicit node -> host map or a domain suffix used to
+# build "<node>.<suffix>". Leave both empty for single-node/local setups.
+# Use the full path — worker nodes may not have pumba on PATH.
+pumba_bin: /users/varuncg/bin/pumba
+node_host_map: {}
+#   node-1: node-1.perfdebug.ragger-pg0.apt.emulab.net
+#   node-4: node-4.perfdebug.ragger-pg0.apt.emulab.net
+node_domain_suffix: perfdebug.ragger-pg0.apt.emulab.net
+fault_settle_seconds: 5        # wait after injecting before generating load
+
+# --- Workload generation ---
+# Sustained load (wrk) runs on loadgen_host via SSH. Short names like node-19
+# are expanded with node_domain_suffix unless listed in node_host_map.
+# Use the full path — the loadgen node may not have wrk on PATH.
+loadgen_host: node-19
+# wrk runs on loadgen_host (node-19); paths must exist there, not on the manager.
+wrk_cwd: /users/varuncg/DeathStarBench/socialNetwork-tail
+wrk_bin: ../wrk2/wrk
+wrk_ulimit_n: 65536
+wrk_distribution: exp
+
+# --- Workload + trace capture ---
+# Fixed wait after load before querying Jaeger. With --phase snapshot, you control
+# how long to wait manually before --phase run (sleep happens at run time).
+jaeger_ingest_seconds: 60
+trace_lookback_minutes: 5
+trace_capture_limit: 200
+
+# --- Harness behavior ---
+print_session: true
+shell_timeout: 30
+results_dir: ./results

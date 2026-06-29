@@ -1,0 +1,39 @@
+# Deployment profile for the socialnet suite.
+#
+#   python3 run.py --config config/suites/socialnet.yml \
+#       --problem-id socialnet:compose_post_delay-trace-1
+
+manager_host: localhost
+ssh_user: varuncg
+ssh_key_path: ~/.ssh/id_rsa
+
+stack_name: sn
+
+prometheus_url: http://node-14.perfdebug.ragger-pg0.apt.emulab.net:9090
+jaeger_url: http://node-13.perfdebug.ragger-pg0.apt.emulab.net:16686
+frontend_url: http://node-0.perfdebug.ragger-pg0.apt.emulab.net:12345
+
+node_host_map: {}
+node_domain_suffix: perfdebug.ragger-pg0.apt.emulab.net
+pumba_bin: /users/varuncg/bin/pumba
+loadgen_host: node-19
+wrk_cwd: /users/varuncg/DeathStarBench/socialNetwork-tail
+wrk_bin: ../wrk2/wrk
+wrk_ulimit_n: 65536
+wrk_distribution: exp
+fault_settle_seconds: 30
+
+jaeger_ingest_seconds: 120
+trace_lookback_minutes: 5
+trace_capture_limit: 200
+
+print_session: true
+shell_timeout: 30
+results_dir: ./results
+
+suites:
+  socialnet:
+    stack_name: sn
+    frontend_url: http://node-0.perfdebug.ragger-pg0.apt.emulab.net:12345
+    jaeger_url: http://node-13.perfdebug.ragger-pg0.apt.emulab.net:16686
+    prometheus_url: http://node-14.perfdebug.ragger-pg0.apt.emulab.net:9090

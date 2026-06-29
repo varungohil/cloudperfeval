@@ -1,0 +1,94 @@
+global:
+  scrape_interval: 10s
+  evaluation_interval: 10s
+
+# node-exporter and otel-collector run in `mode: global` (one task per node) and
+# publish their ports in `mode: host`, so each Swarm node is reachable at
+# node-N.<suffix>:<port>. We scrape each node by hostname (instead of DNS SD on
+# the overlay) so every series carries a stable, human-readable `node` label.
+# This is what lets the agent filter metrics to a single node.
+#
+# Cluster: node-0 .. node-18 on perfdebug.ragger-pg0.apt.emulab.net.
+# Keep this list in sync with the Swarm membership.
+scrape_configs:
+  - job_name: node-exporter
+    static_configs:
+      - targets: ["node-0.perfdebug.ragger-pg0.apt.emulab.net:9100"]
+        labels: {node: node-0}
+      - targets: ["node-1.perfdebug.ragger-pg0.apt.emulab.net:9100"]
+        labels: {node: node-1}
+      - targets: ["node-2.perfdebug.ragger-pg0.apt.emulab.net:9100"]
+        labels: {node: node-2}
+      - targets: ["node-3.perfdebug.ragger-pg0.apt.emulab.net:9100"]
+        labels: {node: node-3}
+      - targets: ["node-4.perfdebug.ragger-pg0.apt.emulab.net:9100"]
+        labels: {node: node-4}
+      - targets: ["node-5.perfdebug.ragger-pg0.apt.emulab.net:9100"]
+        labels: {node: node-5}
+      - targets: ["node-6.perfdebug.ragger-pg0.apt.emulab.net:9100"]
+        labels: {node: node-6}
+      - targets: ["node-7.perfdebug.ragger-pg0.apt.emulab.net:9100"]
+        labels: {node: node-7}
+      - targets: ["node-8.perfdebug.ragger-pg0.apt.emulab.net:9100"]
+        labels: {node: node-8}
+      - targets: ["node-9.perfdebug.ragger-pg0.apt.emulab.net:9100"]
+        labels: {node: node-9}
+      - targets: ["node-10.perfdebug.ragger-pg0.apt.emulab.net:9100"]
+        labels: {node: node-10}
+      - targets: ["node-11.perfdebug.ragger-pg0.apt.emulab.net:9100"]
+        labels: {node: node-11}
+      - targets: ["node-12.perfdebug.ragger-pg0.apt.emulab.net:9100"]
+        labels: {node: node-12}
+      - targets: ["node-13.perfdebug.ragger-pg0.apt.emulab.net:9100"]
+        labels: {node: node-13}
+      - targets: ["node-14.perfdebug.ragger-pg0.apt.emulab.net:9100"]
+        labels: {node: node-14}
+      - targets: ["node-15.perfdebug.ragger-pg0.apt.emulab.net:9100"]
+        labels: {node: node-15}
+      - targets: ["node-16.perfdebug.ragger-pg0.apt.emulab.net:9100"]
+        labels: {node: node-16}
+      - targets: ["node-17.perfdebug.ragger-pg0.apt.emulab.net:9100"]
+        labels: {node: node-17}
+      - targets: ["node-18.perfdebug.ragger-pg0.apt.emulab.net:9100"]
+        labels: {node: node-18}
+
+  - job_name: otel-collector
+    static_configs:
+      - targets: ["node-0.perfdebug.ragger-pg0.apt.emulab.net:8889"]
+        labels: {node: node-0}
+      - targets: ["node-1.perfdebug.ragger-pg0.apt.emulab.net:8889"]
+        labels: {node: node-1}
+      - targets: ["node-2.perfdebug.ragger-pg0.apt.emulab.net:8889"]
+        labels: {node: node-2}
+      - targets: ["node-3.perfdebug.ragger-pg0.apt.emulab.net:8889"]
+        labels: {node: node-3}
+      - targets: ["node-4.perfdebug.ragger-pg0.apt.emulab.net:8889"]
+        labels: {node: node-4}
+      - targets: ["node-5.perfdebug.ragger-pg0.apt.emulab.net:8889"]
+        labels: {node: node-5}
+      - targets: ["node-6.perfdebug.ragger-pg0.apt.emulab.net:8889"]
+        labels: {node: node-6}
+      - targets: ["node-7.perfdebug.ragger-pg0.apt.emulab.net:8889"]
+        labels: {node: node-7}
+      - targets: ["node-8.perfdebug.ragger-pg0.apt.emulab.net:8889"]
+        labels: {node: node-8}
+      - targets: ["node-9.perfdebug.ragger-pg0.apt.emulab.net:8889"]
+        labels: {node: node-9}
+      - targets: ["node-10.perfdebug.ragger-pg0.apt.emulab.net:8889"]
+        labels: {node: node-10}
+      - targets: ["node-11.perfdebug.ragger-pg0.apt.emulab.net:8889"]
+        labels: {node: node-11}
+      - targets: ["node-12.perfdebug.ragger-pg0.apt.emulab.net:8889"]
+        labels: {node: node-12}
+      - targets: ["node-13.perfdebug.ragger-pg0.apt.emulab.net:8889"]
+        labels: {node: node-13}
+      - targets: ["node-14.perfdebug.ragger-pg0.apt.emulab.net:8889"]
+        labels: {node: node-14}
+      - targets: ["node-15.perfdebug.ragger-pg0.apt.emulab.net:8889"]
+        labels: {node: node-15}
+      - targets: ["node-16.perfdebug.ragger-pg0.apt.emulab.net:8889"]
+        labels: {node: node-16}
+      - targets: ["node-17.perfdebug.ragger-pg0.apt.emulab.net:8889"]
+        labels: {node: node-17}
+      - targets: ["node-18.perfdebug.ragger-pg0.apt.emulab.net:8889"]
+        labels: {node: node-18}
