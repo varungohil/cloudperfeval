@@ -36,6 +36,16 @@ def _fault_type_label(faults: list[FaultSpec]) -> str:
     return types[0] if len(types) == 1 else "+".join(types)
 
 
+def _resource_from_fault(fault: FaultSpec) -> str:
+    if fault.fault_type == "cpu":
+        return "cpu"
+    if fault.fault_type == "delay":
+        return "network"
+    raise ValueError(
+        f"Cannot derive bottleneck resource from fault type {fault.fault_type!r}"
+    )
+
+
 class PerformanceProblem:
     def __init__(
         self,
@@ -47,6 +57,11 @@ class PerformanceProblem:
         fault: FaultSpec | None = None,
         faults: list[FaultSpec] | None = None,
         bottleneck_aliases: list[str] | None = None,
+        bottleneck_resource: str | None = None,
+        network_from_service: str | None = None,
+        network_to_service: str | None = None,
+        network_from_aliases: list[str] | None = None,
+        network_to_aliases: list[str] | None = None,
         suite: SuiteSpec | None = None,
     ):
         if faults is not None:
@@ -63,6 +78,11 @@ class PerformanceProblem:
         self.task = task
         self.bottleneck_service = bottleneck_service
         self.bottleneck_aliases = bottleneck_aliases or []
+        self.bottleneck_resource = bottleneck_resource
+        self.network_from_service = network_from_service
+        self.network_to_service = network_to_service
+        self.network_from_aliases = network_from_aliases or []
+        self.network_to_aliases = network_to_aliases or []
         self.suite = suite
 
         self.injector = PumbaInjector()
@@ -90,21 +110,40 @@ class PerformanceProblem:
     def _build_ground_truth(self) -> None:
         assert self.workload_result is not None
         fault_targets = [f.target_service for f in self.faults]
+        primary_fault = self.faults[0]
+        bottleneck_resource = self.bottleneck_resource
+        network_from = self.network_from_service
+        network_to = self.network_to_service
+        if self.task.task_type == "resource_diagnosis":
+            if bottleneck_resource is None:
+                bottleneck_resource = _resource_from_fault(primary_fault)
+            if bottleneck_resource == "network":
+                network_from = network_from or primary_fault.target_service
+                network_to = network_to or primary_fault.peer_service
         self.ground_truth = GroundTruth(
             bottleneck_service=self.bottleneck_service,
             fault_type=_fault_type_label(self.faults),
             fault_target=fault_targets[0],
             fault_targets=fault_targets,
             endpoint=self.workload.endpoint,
-            reference_trace_ids=self.workload_result.trace_ids,
+            reference_trace_ids=self.workload_result.oracle_trace_ids,
+            trace_oracle_service=self.workload_result.voted_bottleneck,
             aliases=self.bottleneck_aliases,
+            bottleneck_resource=bottleneck_resource,
+            network_from_service=network_from,
+            network_to_service=network_to,
+            network_from_aliases=self.network_from_aliases,
+            network_to_aliases=self.network_to_aliases,
         )
+
+    def _run_workload(self, *, defer_jaeger: bool = False) -> WorkloadResult:
+        return self.loadgen.run(self.workload, defer_jaeger=defer_jaeger)
 
     def setup(self) -> WorkloadResult:
         """Recover leftovers, inject all faults, generate load, build ground truth."""
         self.injector.recover_all()
         self._chaos_ids = self.injector.inject_all(self.faults)
-        self.workload_result = self.loadgen.run(self.workload)
+        self.workload_result = self._run_workload()
         self._build_ground_truth()
         return self.workload_result
 
@@ -112,9 +151,9 @@ class PerformanceProblem:
         """Inject fault, send load, save snapshot, recover fault; skip Jaeger wait/capture."""
         self.injector.recover_all()
         self._chaos_ids = self.injector.inject_all(self.faults)
-        partial = self.loadgen.run(self.workload, defer_jaeger=True)
+        partial = self._run_workload(defer_jaeger=True)
         stored = StoredRun(
-            snapshot_id=StoredRun.new_id(),
+            snapshot_id=StoredRun.new_id(self.problem_id),
             problem_id=self.problem_id,
             trace_id=partial.correlation_trace_id,
             spec_summary=partial.spec_summary,

@@ -12,6 +12,11 @@ if TYPE_CHECKING:
     from cloudperfeval.run_log import RunLogCapture
 
 
+def problem_short_name(problem_id: str) -> str:
+    """Short problem name (without suite prefix) for result artifact filenames."""
+    return problem_id.split(":", 1)[-1]
+
+
 class Session:
     def __init__(self):
         self.session_id = str(uuid.uuid4())
@@ -83,12 +88,18 @@ class Session:
             "run_log_path": self.run_log_path,
         }
 
+    def _artifact_stem(self) -> str:
+        if self.problem_id:
+            return f"{problem_short_name(self.problem_id)}_{self.session_id}"
+        return self.session_id
+
     def to_json(self) -> str:
         results_dir = Path(config.get("results_dir", "./results"))
         results_dir.mkdir(parents=True, exist_ok=True)
-        path = results_dir / f"{self.session_id}.json"
+        stem = self._artifact_stem()
+        path = results_dir / f"{stem}.json"
         if self.run_log:
-            log_path = results_dir / f"{self.session_id}.log"
+            log_path = results_dir / f"{stem}.log"
             log_path.write_text(self.run_log, encoding="utf-8")
             self.run_log_path = str(log_path)
         with open(path, "w") as f:

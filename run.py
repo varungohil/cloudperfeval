@@ -7,9 +7,11 @@ import sys
 
 from cloudperfeval.agents.factory import AGENT_CHOICES, create_agent
 from cloudperfeval.config import config
+from cloudperfeval.fault import FaultInjectionError
 from cloudperfeval.orchestrator import Orchestrator
 from cloudperfeval.problems.registry import ProblemRegistry
 from cloudperfeval.stored_run import StoredRun
+from cloudperfeval.workload import TraceCaptureError
 
 
 def parse_args():
@@ -90,25 +92,36 @@ async def main():
     print(f"Agent   : {args.agent}" + (f" ({args.model})" if args.model else ""))
     print("=" * 60)
 
+    setup_failed = False
     try:
-        task_desc, instructions, apis = orch.init_problem(
-            args.problem_id,
-            phase=args.phase,
-            snapshot_id=args.snapshot_id,
-        )
+        try:
+            task_desc, instructions, apis = orch.init_problem(
+                args.problem_id,
+                phase=args.phase,
+                snapshot_id=args.snapshot_id,
+            )
+        except (FaultInjectionError, TraceCaptureError) as e:
+            setup_failed = True
+            if orch.problem is not None:
+                print(f"[ENV] Setup failed ({type(e).__name__}); recovering...", file=sys.stderr)
+                orch.problem.teardown()
+            print(f"Setup failed: {e}", file=sys.stderr)
+        else:
+            if args.phase == "snapshot":
+                print("[ENV] Snapshot saved. Fault recovered.")
+                return
 
-        if args.phase == "snapshot":
-            print("[ENV] Snapshot saved. Fault recovered.")
-            return
+            agent.init_context(task_desc, instructions, apis)
 
-        agent.init_context(task_desc, instructions, apis)
-
-        out = await orch.run(max_steps=args.max_steps)
-        print("\nFinal results:")
-        for k, v in out["results"].items():
-            print(f"  {k}: {v}")
+            out = await orch.run(max_steps=args.max_steps)
+            print("\nFinal results:")
+            for k, v in out["results"].items():
+                print(f"  {k}: {v}")
     finally:
         orch.save_session()
+
+    if setup_failed:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -69,6 +69,7 @@ void MediaHandler::ComposeMedia(
     se.message =
         "The lengths of media_id list and media_type list are not equal";
     span->End();
+    FlushTraces();
     throw se;
   }
 
@@ -80,6 +81,7 @@ void MediaHandler::ComposeMedia(
   }
 
   span->End();
+  FlushTraces();
 }
 
 }  // namespace social_network

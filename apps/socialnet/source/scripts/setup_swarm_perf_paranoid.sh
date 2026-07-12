@@ -7,13 +7,13 @@
 #   ./scripts/setup_swarm_perf_paranoid.sh
 #
 # Methods:
-#   docker  (default) Run a one-shot global Swarm service with --privileged --pid host
-#   ssh             SSH to each node hostname from `docker node ls` and run sudo sysctl
+#   ssh     (default) SSH to each node hostname from `docker node ls` and run sudo sysctl
+#   docker          One-shot global Swarm service (often fails: /proc/sys bind blocked)
 #   local           Only configure the machine this script runs on
 
 set -euo pipefail
 
-METHOD="${METHOD:-docker}"
+METHOD="${METHOD:-ssh}"
 SERVICE_NAME="perf-event-paranoid-setup"
 SYSCTL_CMD=(sysctl -w kernel.perf_event_paranoid=0)
 
@@ -24,7 +24,7 @@ Usage: $(basename "$0") [OPTIONS]
 Set kernel.perf_event_paranoid=0 on Swarm nodes for node-exporter PMU collection.
 
 Options:
-  -m, --method METHOD   docker (default), ssh, or local
+  -m, --method METHOD   ssh (default), docker, or local
   -h, --help            Show this help
 
 Environment:
@@ -74,7 +74,7 @@ run_via_ssh() {
   require_swarm_manager
 
   local ssh_user="${SSH_USER:-${USER}}"
-  local ssh_opts="${SSH_OPTS:--o BatchMode=yes -o ConnectTimeout=15}"
+  local ssh_opts="${SSH_OPTS:--o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new}"
   local -a nodes=()
   local failed=0
 
@@ -148,18 +148,26 @@ run_via_docker() {
   fi
 
   log "Creating global service '${SERVICE_NAME}' on all Swarm nodes"
-  docker service create \
+  err "Note: docker method often fails on Swarm (/proc/sys bind mount blocked). Prefer METHOD=ssh."
+  # Swarm services do not support --privileged; /proc/sys bind is blocked on many clusters.
+  if ! docker service create \
     --name "$SERVICE_NAME" \
     --mode global \
     --restart-condition none \
-    --privileged \
-    --pid host \
-    alpine sh -c "${SYSCTL_CMD[*]} && echo OK on \$(hostname -s)"
-
-  if wait_for_global_service "$SERVICE_NAME"; then
-    log "Logs:"
-    docker service logs "$SERVICE_NAME" 2>/dev/null || true
+    --cap-add SYS_ADMIN \
+    --mount type=bind,source=/proc/sys,target=/proc/sys \
+    alpine sh -c "${SYSCTL_CMD[*]} && echo OK on \$(hostname -s)"; then
+    docker service rm "$SERVICE_NAME" >/dev/null 2>&1 || true
+    return 1
   fi
+
+  if ! wait_for_global_service "$SERVICE_NAME"; then
+    docker service rm "$SERVICE_NAME" >/dev/null 2>&1 || true
+    return 1
+  fi
+
+  log "Logs:"
+  docker service logs "$SERVICE_NAME" 2>/dev/null || true
 
   log "Removing service '${SERVICE_NAME}'"
   docker service rm "$SERVICE_NAME" >/dev/null

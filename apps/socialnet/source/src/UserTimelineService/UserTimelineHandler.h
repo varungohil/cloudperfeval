@@ -207,6 +207,7 @@ void UserTimelineHandler::WriteUserTimeline(
   }
   redis_span->End();
   span->End();
+  FlushTraces();
 }
 
 void UserTimelineHandler::ReadUserTimeline(
@@ -238,6 +239,8 @@ void UserTimelineHandler::ReadUserTimeline(
   prop->Inject(writer, new_ctx);
 
   if (stop <= start || start < 0) {
+    span->End();
+    FlushTraces();
     return;
   }
 
@@ -402,6 +405,7 @@ void UserTimelineHandler::ReadUserTimeline(
     throw;
   }
   span->End();
+  FlushTraces();
 }
 
 }  // namespace social_network

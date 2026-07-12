@@ -2,9 +2,9 @@
 
 The primary score is an exact match of the agent's `root_cause_service` against
 the ground-truth bottleneck. As a cross-check we also run a programmatic
-trace oracle (largest exclusive span time in the reference trace) so a run can
-pass if the agent agrees with the observed data even when ground-truth naming
-differs slightly.
+trace oracle (majority vote of per-trace bottleneck services across the
+slowest captured traces) so a run can pass if the agent agrees with the observed
+data even when ground-truth naming differs slightly.
 
 Ground truth is never shown to the agent — it lives on the Problem and is only
 consumed here.
@@ -23,9 +23,16 @@ class GroundTruth:
     fault_type: str                   # "delay" | "cpu" | "delay+cpu" for multi
     fault_target: str                 # primary fault target (backward compat)
     endpoint: str
-    reference_trace_ids: list[str] = field(default_factory=list)
+    reference_trace_ids: list[str] = field(default_factory=list)  # slowest ~20% used by oracle
+    trace_oracle_service: str | None = None   # voted_bottleneck from workload capture
     fault_targets: list[str] = field(default_factory=list)  # all injected services
     aliases: list[str] = field(default_factory=list)
+    # resource_diagnosis grading (cpu | mem | network | disk)
+    bottleneck_resource: str | None = None
+    network_from_service: str | None = None
+    network_to_service: str | None = None
+    network_from_aliases: list[str] = field(default_factory=list)
+    network_to_aliases: list[str] = field(default_factory=list)
 
 
 def normalize_service(name) -> str:
@@ -83,8 +90,8 @@ def eval_with_trace_oracle(soln, gt: GroundTruth, jaeger: JaegerAPI) -> dict:
     """Exact match plus a trace-oracle cross-check; success if either agrees."""
     result = eval_localization(soln, gt)
 
-    oracle_service = None
-    if gt.reference_trace_ids:
+    oracle_service = gt.trace_oracle_service
+    if oracle_service is None and gt.reference_trace_ids:
         oracle_service = bottleneck_from_trace(jaeger, gt.reference_trace_ids[0])
 
     predicted = result.get("predicted_service")

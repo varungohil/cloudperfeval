@@ -190,18 +190,39 @@ class SwarmActions:
         return "\n".join(services) if services else "(no trace services found)"
 
     @read
-    def get_traces(self, service: str, duration: int = 5, limit: int = 100) -> str:
+    def get_traces(
+        self,
+        service: str,
+        start_ts: float | None = None,
+        end_ts: float | None = None,
+        duration: int = 5,
+        limit: int = 100,
+    ) -> str:
         """Summarize per-operation span latency and exclusive self-time (p50/p95/p99 ms, errors).
 
         Span duration (P*_ms) is inclusive of child spans. Self time (SELF_P*_ms) is
         duration minus direct children, computed per span within each trace.
+        Provide epoch-second start_ts/end_ts to search traces whose root span started
+        during that window (e.g. the workload interval), or omit them to look back
+        ``duration`` minutes from now.
 
         Args:
             service (str): Trace service name (see list_trace_services()).
-            duration (int): Lookback window in minutes (default 5).
+            start_ts (float): Window start, epoch seconds (optional; requires end_ts).
+            end_ts (float): Window end, epoch seconds (optional; requires start_ts).
+            duration (int): If start/end omitted, look back this many minutes (default 5).
             limit (int): Max traces to fetch (default 100).
         """
-        return self.jaeger.summarize(service, minutes=duration, limit=limit)
+        try:
+            return self.jaeger.summarize(
+                service,
+                minutes=duration,
+                limit=limit,
+                start_ts=start_ts,
+                end_ts=end_ts,
+            )
+        except ValueError as e:
+            return f"(error: {e})"
 
     @read
     def list_trace_operations(self, service: str) -> str:
@@ -220,26 +241,41 @@ class SwarmActions:
         self,
         service: str,
         min_latency_ms: float,
+        start_ts: float | None = None,
+        end_ts: float | None = None,
         duration: int = 5,
         limit: int = 100,
     ) -> str:
         """Fetch raw Jaeger traces whose end-to-end latency exceeds min_latency_ms.
 
+        Provide epoch-second start_ts/end_ts to restrict to a past window, or omit
+        them to look back ``duration`` minutes from now.
+
         Args:
             service (str): Trace service name.
             min_latency_ms (float): Minimum end-to-end latency in milliseconds.
-            duration (int): Lookback window in minutes (default 5).
+            start_ts (float): Window start, epoch seconds (optional; requires end_ts).
+            end_ts (float): Window end, epoch seconds (optional; requires start_ts).
+            duration (int): If start/end omitted, look back this many minutes (default 5).
             limit (int): Max traces to fetch from Jaeger before filtering (default 100).
         """
-        traces = self.jaeger.traces_above_latency(
-            service,
-            min_latency_ms=min_latency_ms,
-            minutes=duration,
-            limit=limit,
-        )
+        try:
+            _, window = self.jaeger.trace_time_params(
+                start_ts=start_ts, end_ts=end_ts, minutes=duration,
+            )
+            traces = self.jaeger.traces_above_latency(
+                service,
+                min_latency_ms=min_latency_ms,
+                minutes=duration,
+                limit=limit,
+                start_ts=start_ts,
+                end_ts=end_ts,
+            )
+        except ValueError as e:
+            return f"(error: {e})"
         return self.jaeger.format_raw_traces(
             traces,
-            f"for service '{service}' in the last {duration}m "
+            f"for service '{service}' {window} "
             f"with e2e latency >= {min_latency_ms:g}ms",
         )
 
@@ -254,11 +290,13 @@ class SwarmActions:
         return self.jaeger.format_raw_traces(traces, f"for trace id '{trace_id}'")
 
     @read
-    def get_dependency_graph(self, duration: int = 30) -> str:
+    def get_dependency_graph(self, duration: int = 1440) -> str:
         """Fetch the Jaeger service dependency graph (caller/callee edges).
 
         Args:
-            duration (int): Lookback window in minutes (default 30).
+            duration (int): Lookback window in minutes (default 1440 = 24h).
+                Dependency edges are aggregated daily by the Spark job, so short
+                windows often return no data even when the graph exists.
         """
         graph = self.jaeger.get_dependency_graph(minutes=duration)
         if not graph:
@@ -319,7 +357,11 @@ class SwarmActions:
 
         Args:
             solution: A dict, e.g.
-                {"root_cause_service": "compose-post-service", "reason": "..."}.
+                {"root_cause_service": "compose-post-service", "reason": "..."}
+                for service-diagnosis tasks, or
+                {"resource": "cpu", "service": "compose-post-service", "reason": "..."}
+                / {"resource": "network", "from_service": "...", "to_service": "...", "reason": "..."}
+                for resource-diagnosis tasks.
         """
         return SubmissionStatus.VALID_SUBMISSION
 

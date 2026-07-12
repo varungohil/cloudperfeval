@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # Deploy socialNetwork on Docker Swarm with one business microservice per node
-# (each with its DB/cache co-located). Global observability (node-exporter,
-# otel-collector) still runs on all nodes.
+# (nodes 0-11). Cache/storage co-located with the corresponding business service.
+# Global observability (node-exporter, otel-collector) on all nodes.
 #
 # Run from a Swarm manager with the repo at the same path on all nodes:
 #   ./scripts/deploy_swarm_one_per_node.sh [stack-name]
@@ -41,13 +41,13 @@ text = source.read_text()
 
 GLOBAL_SERVICES = {"node-exporter", "otel-collector"}
 
-# One business microservice per node (plus its DB/cache). nginx-web-server and
-# media-frontend are omitted (unused). 16 pinned tiers + 3 spare on a 19-node cluster.
+# One business microservice per node (nodes 0-11). Cache/storage co-located
+# with the corresponding business service. 19-node cluster.
 NODE_GROUPS = [
     ["frontend"],
     ["compose-post-service"],
     ["home-timeline-service", "home-timeline-redis"],
-    ["user-timeline-service", "user-timeline-mongodb", "user-timeline-redis"],
+    ["user-timeline-service", "user-timeline-redis", "user-timeline-mongodb"],
     ["post-storage-service", "post-storage-mongodb", "post-storage-memcached"],
     ["user-service", "user-mongodb", "user-memcached"],
     ["social-graph-service", "social-graph-mongodb", "social-graph-redis"],
@@ -57,9 +57,8 @@ NODE_GROUPS = [
     ["unique-id-service"],
     ["user-mention-service"],
     ["cassandra", "cassandra-schema"],
-    ["jaeger", "jaeger-query"],
+    ["jaeger", "jaeger-query", "jaeger-spark-dependencies", "otel-tailsampler"],
     ["prometheus"],
-    ["grafana"],
 ]
 
 import os
@@ -82,13 +81,18 @@ def inject_deploy(service: str, hostname: str) -> None:
     start = text.find(marker)
     if start == -1:
         raise SystemExit(f"service not found: {service}")
-    next_svc = text.find("\n  ", start + len(marker))
-    if next_svc == -1:
-        block = text[start:]
-        rest = ""
-    else:
+    # Next top-level service key (two-space indent), not nested "    key:" lines.
+    next_m = re.search(
+        r"\n  (?![ #])[a-zA-Z0-9\"'_-]+:",
+        text[start + len(marker) :],
+    )
+    if next_m:
+        next_svc = start + len(marker) + next_m.start()
         block = text[start:next_svc]
         rest = text[next_svc:]
+    else:
+        block = text[start:]
+        rest = ""
 
     host_line = f'          - node.hostname == {hostname}\n'
     if "placement:" in block and "constraints:" in block:
@@ -99,12 +103,20 @@ def inject_deploy(service: str, hostname: str) -> None:
             count=1,
         )
     elif re.search(r"\n\s+deploy:\n", block):
-        block = re.sub(
-            r"(\n\s+deploy:\n)",
-            rf"\1      placement:\n        constraints:\n{host_line}",
-            block,
-            count=1,
-        )
+        if "placement:" not in block:
+            block = re.sub(
+                r"(\n\s+deploy:\n)",
+                rf"\1      placement:\n        constraints:\n{host_line}",
+                block,
+                count=1,
+            )
+        else:
+            block = re.sub(
+                r"(\s+placement:\n\s+constraints:\n)(?:\s+- node\.hostname == .+\n)*",
+                rf"\1{host_line}",
+                block,
+                count=1,
+            )
     else:
         m = re.search(r"\n    [a-zA-Z0-9_-]+:", block)
         insert_at = m.start() if m else len(block)
@@ -139,8 +151,13 @@ wait_for_service_running() {
   local elapsed=0
   while [[ "$elapsed" -lt "$timeout" ]]; do
     local running desired
+    if ! docker service inspect "$service" >/dev/null 2>&1; then
+      sleep 3
+      elapsed=$((elapsed + 3))
+      continue
+    fi
     running="$(docker service ps "$service" --filter desired-state=running --format '{{.CurrentState}}' 2>/dev/null | grep -ci running || true)"
-    desired="$(docker service ls --filter name="$service" --format '{{.Replicas}}' 2>/dev/null | awk -F/ '{print $2}' || echo 0)"
+    desired="$(docker service inspect "$service" --format '{{if .Spec.Mode.Replicated}}{{.Spec.Mode.Replicated.Replicas}}{{else}}1{{end}}' 2>/dev/null || echo 0)"
     if [[ "$running" -ge "$desired" && "$desired" -gt 0 ]]; then
       return 0
     fi
@@ -151,12 +168,49 @@ wait_for_service_running() {
   return 1
 }
 
+wait_for_schema_complete() {
+  local service="$1"
+  local timeout="${2:-600}"
+  local elapsed=0
+  while [[ "$elapsed" -lt "$timeout" ]]; do
+    local state
+    state="$(docker service ps "$service" --no-trunc --format '{{.CurrentState}}' 2>/dev/null | head -1 || true)"
+    if [[ "$state" == Complete* ]]; then
+      return 0
+    fi
+    if [[ "$state" == Failed* ]]; then
+      docker service ps "$service" --no-trunc || true
+      return 1
+    fi
+    sleep 3
+    elapsed=$((elapsed + 3))
+  done
+  docker service ps "$service" --no-trunc || true
+  return 1
+}
+
+restart_jaeger_query_after_schema() {
+  # jaeger-query detects dependencies_v2 only at startup; restart after schema exists.
+  log "Restarting ${STACK_NAME}_jaeger-query after Cassandra schema init"
+  docker service update --force "${STACK_NAME}_jaeger-query" >/dev/null
+  wait_for_service_running "${STACK_NAME}_jaeger-query" 300 || true
+}
+
 main() {
   require_swarm_manager
   cd "$ROOT_DIR"
 
-  log "Setting kernel.perf_event_paranoid=0 on all nodes"
-  "${SCRIPT_DIR}/setup_swarm_perf_paranoid.sh"
+  # Swarm cannot bind-mount /proc/sys (docker method fails). Use SSH on Emulab clusters.
+  if [[ "${SKIP_PERF_SETUP:-0}" == "1" ]]; then
+    log "Skipping kernel.perf_event_paranoid setup (SKIP_PERF_SETUP=1)"
+  else
+    docker service rm perf-event-paranoid-setup >/dev/null 2>&1 || true
+    log "Setting kernel.perf_event_paranoid=0 on all nodes (METHOD=${PERF_SETUP_METHOD:-ssh})"
+    if ! METHOD="${PERF_SETUP_METHOD:-ssh}" "${SCRIPT_DIR}/setup_swarm_perf_paranoid.sh"; then
+      err "perf_event_paranoid setup failed; continuing deploy"
+      err "(node-exporter --collector.perf may not work; set SKIP_PERF_SETUP=1 to silence)"
+    fi
+  fi
 
   mapfile -t nodes < <(get_nodes)
   if [[ ${#nodes[@]} -eq 0 ]]; then
@@ -175,8 +229,11 @@ main() {
 
   log "Waiting for cassandra and jaeger"
   wait_for_service_running "${STACK_NAME}_cassandra" 600 || err "cassandra slow to start"
+  wait_for_schema_complete "${STACK_NAME}_cassandra-schema" 600 || err "cassandra-schema failed"
   wait_for_service_running "${STACK_NAME}_jaeger" 300 || true
   wait_for_service_running "${STACK_NAME}_jaeger-query" 300 || true
+  restart_jaeger_query_after_schema
+  wait_for_service_running "${STACK_NAME}_jaeger-spark-dependencies" 300 || true
 
   log "Stack services:"
   docker stack services "$STACK_NAME"

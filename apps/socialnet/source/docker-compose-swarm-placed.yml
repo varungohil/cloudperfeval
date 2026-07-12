@@ -93,8 +93,6 @@ services:
 
   otel-collector:
     image: otel/opentelemetry-collector-contrib:latest
-    container_name: otel-collector
-    restart: always
     deploy:
       mode: global
     command: ["--config=/etc/otelcol-collector-config.yml"]
@@ -132,8 +130,6 @@ services:
   # here and the tail_sampling processor sees the complete trace.
   otel-tailsampler:
     image: otel/opentelemetry-collector-contrib:latest
-    container_name: otel-tailsampler
-    restart: always
     command: ["--config=/etc/otelcol-tailsampler-config.yml"]
     configs:
       - source: otel_tailsampler_config_yml

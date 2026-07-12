@@ -45,7 +45,7 @@ processors:
       - name: probabilistic
         type: probabilistic
         probabilistic:
-          sampling_percentage: 10
+          sampling_percentage: 0.1
   batch:
     timeout: 1s
     send_batch_size: 512

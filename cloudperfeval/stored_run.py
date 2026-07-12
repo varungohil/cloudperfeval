@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from cloudperfeval.config import config
+from cloudperfeval.session import problem_short_name
 
 _STORED_RUNS_DIR = "stored_runs"
 
@@ -33,11 +34,33 @@ class StoredRun:
         return Path(config.get("results_dir", "./results")) / _STORED_RUNS_DIR
 
     @classmethod
-    def new_id(cls) -> str:
-        return uuid.uuid4().hex[:12]
+    def new_id(cls, problem_id: str | None = None) -> str:
+        suffix = uuid.uuid4().hex[:12]
+        if problem_id:
+            return f"{problem_short_name(problem_id)}_{suffix}"
+        return suffix
 
     def path(self) -> Path:
         return self.store_dir() / f"{self.snapshot_id}.json"
+
+    @classmethod
+    def _resolve_path(cls, snapshot_id: str) -> Path:
+        directory = cls.store_dir()
+        exact = directory / f"{snapshot_id}.json"
+        if exact.is_file():
+            return exact
+        prefixed = sorted(directory.glob(f"*_{snapshot_id}.json"))
+        if len(prefixed) == 1:
+            return prefixed[0]
+        if len(prefixed) > 1:
+            names = ", ".join(p.name for p in prefixed)
+            raise FileNotFoundError(
+                f"Ambiguous snapshot id {snapshot_id!r}; matches: {names}"
+            )
+        raise FileNotFoundError(
+            f"No snapshot {snapshot_id!r} under {directory}. "
+            "Run with --phase snapshot first, or pass --list-snapshots to see ids."
+        )
 
     def save(self) -> Path:
         self.store_dir().mkdir(parents=True, exist_ok=True)
@@ -53,12 +76,7 @@ class StoredRun:
 
     @classmethod
     def load(cls, snapshot_id: str) -> StoredRun:
-        path = cls.store_dir() / f"{snapshot_id}.json"
-        if not path.is_file():
-            raise FileNotFoundError(
-                f"No snapshot {snapshot_id!r} at {path}. "
-                "Run with --phase snapshot first, or pass --list-snapshots to see ids."
-            )
+        path = cls._resolve_path(snapshot_id)
         data = cls._parse_snapshot_data(json.loads(path.read_text(encoding="utf-8")))
         return cls(**data)
 
@@ -80,7 +98,10 @@ class StoredRun:
         runs: list[StoredRun] = []
         for path in sorted(directory.glob("*.json"), key=lambda p: p.stat().st_mtime):
             try:
-                stored = cls.load(path.stem)
+                data = cls._parse_snapshot_data(
+                    json.loads(path.read_text(encoding="utf-8"))
+                )
+                stored = cls(**data)
             except (json.JSONDecodeError, TypeError, KeyError):
                 continue
             if problem_id and stored.problem_id != problem_id:

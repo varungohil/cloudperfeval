@@ -330,6 +330,7 @@ void SocialGraphHandler::Follow(
   }
 
   span->End();
+  FlushTraces();
 }
 
 void SocialGraphHandler::Unfollow(
@@ -541,6 +542,7 @@ void SocialGraphHandler::Unfollow(
   }
 
   span->End();
+  FlushTraces();
 }
 
 void SocialGraphHandler::GetFollowers(
@@ -695,6 +697,7 @@ void SocialGraphHandler::GetFollowers(
     }
   }
   span->End();
+  FlushTraces();
 }
 
 void SocialGraphHandler::GetFollowees(
@@ -857,6 +860,7 @@ void SocialGraphHandler::GetFollowees(
     }
   }
   span->End();
+  FlushTraces();
 }
 
 void SocialGraphHandler::InsertUser(
@@ -930,6 +934,7 @@ void SocialGraphHandler::InsertUser(
   mongoc_collection_destroy(collection);
   mongoc_client_pool_push(_mongodb_client_pool, mongodb_client);
   span->End();
+  FlushTraces();
 }
 
 void SocialGraphHandler::FollowWithUsername(
@@ -1030,6 +1035,7 @@ void SocialGraphHandler::FollowWithUsername(
     Follow(req_id, user_id, followee_id, writer_text_map);
   }
   span->End();
+  FlushTraces();
 }
 
 void SocialGraphHandler::UnfollowWithUsername(
@@ -1131,6 +1137,7 @@ void SocialGraphHandler::UnfollowWithUsername(
     }
   }
   span->End();
+  FlushTraces();
 }
 
 }  // namespace social_network

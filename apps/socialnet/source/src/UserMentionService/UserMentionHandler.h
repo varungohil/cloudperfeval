@@ -250,6 +250,7 @@ void UserMentionHandler::ComposeUserMentions(
 
   _return = user_mentions;
   span->End();
+  FlushTraces();
 }
 
 }  // namespace social_network

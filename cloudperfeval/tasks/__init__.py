@@ -1,7 +1,11 @@
 """Task types: prompt + expected submission schema + eval()."""
 
 from cloudperfeval.tasks.base import PerformanceTask
-from cloudperfeval.tasks.endpoint_diagnosis import EndpointDiagnosisTask
-from cloudperfeval.tasks.trace_localization import TraceLocalizationTask
+from cloudperfeval.tasks.resource_diagnosis import ResourceDiagnosis
+from cloudperfeval.tasks.service_diagnosis import ServiceDiagnosis
 
-__all__ = ["PerformanceTask", "EndpointDiagnosisTask", "TraceLocalizationTask"]
+__all__ = [
+    "PerformanceTask",
+    "ResourceDiagnosis",
+    "ServiceDiagnosis",
+]

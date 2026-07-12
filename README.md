@@ -49,10 +49,14 @@ run(max_steps):    agent emits one read-only API call per turn
 
 Two task types ship today:
 
-- **trace-localization** (`*-trace-*`): agent is handed one slow trace ID and
-  must name the bottleneck service.
-- **endpoint-diagnosis** (`*-open-*`): an endpoint is slow under load; the
-  agent explores traces/metrics/logs to find the bottleneck.
+- **service-diagnosis-single-request** (`*-trace-*`): agent is handed one slow
+  trace ID and must name the bottleneck service.
+- **service-diagnosis-sustained-requests** (`*-open-*`): an endpoint is slow
+  under load; the agent explores traces/metrics/logs to find the bottleneck.
+- **resource-diagnosis** (`*-resource-*`): under load, the agent identifies
+  the bottleneck resource (cpu, mem, network, or disk) and localizes it to a
+  service; for network bottlenecks it also names the starting and ending
+  services on the congested path.
 
 ## Submission + grading
 
@@ -62,12 +66,25 @@ The agent submits:
 submit({"root_cause_service": "compose-post-service", "reason": "..."})
 ```
 
-`eval()` scores it two ways and passes if **either** agrees:
+For resource-diagnosis problems:
+
+```
+submit({"resource": "cpu", "service": "home-timeline-service", "reason": "..."})
+submit({"resource": "network", "from_service": "home-timeline-service",
+        "to_service": "post-storage-service", "reason": "..."})
+```
+
+For service-diagnosis problems, `eval()` scores two ways and passes if **either**
+agrees:
 
 1. **Exact match** of `root_cause_service` vs the faulted service (name
    normalized; `-service` suffix and aliases tolerated).
 2. **Trace oracle**: the service with the largest *exclusive* span time in the
    reference trace (`JaegerAPI.self_time_by_service`).
+
+Resource-diagnosis grading requires an exact match on the bottleneck resource
+and service localization (for network faults, both `from_service` and
+`to_service` must match).
 
 Results (per run) land in `results/<session_id>.json`:
 
@@ -161,7 +178,7 @@ suite.namespaced_id("compose_post_delay-trace-1"): lambda: PerformanceProblem(
     suite=suite,
     fault=FaultSpec("delay", "compose-post-service", delay_ms=500),
     workload=wl.single(wl.COMPOSE_POST),
-    task=TraceLocalizationTask(),
+    task=ServiceDiagnosis(),
     bottleneck_service="compose-post-service",
 ),
 ```
@@ -178,7 +195,7 @@ suite.namespaced_id("compose_multi_fault-trace-1"): lambda: PerformanceProblem(
         FaultSpec("cpu", "social-graph-service", cpu_workers=2),
     ],
     workload=wl.single(wl.COMPOSE_POST),
-    task=TraceLocalizationTask(),
+    task=ServiceDiagnosis(),
     bottleneck_service="compose-post-service",  # primary on critical path
 ),
 ```

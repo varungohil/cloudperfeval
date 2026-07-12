@@ -249,6 +249,7 @@ void UserHandler::RegisterUserWithId(
   }
 
   span->End();
+  FlushTraces();
 }
 
 void UserHandler::RegisterUser(
@@ -413,6 +414,7 @@ void UserHandler::RegisterUser(
   }
 
   span->End();
+  FlushTraces();
 }
 
 void UserHandler::ComposeCreatorWithUsername(
@@ -591,6 +593,7 @@ void UserHandler::ComposeCreatorWithUsername(
     LOG(warning) << "Failed to pop a client from memcached pool";
   }
   span->End();
+  FlushTraces();
 }
 
 void UserHandler::ComposeCreatorWithUserId(
@@ -627,6 +630,7 @@ void UserHandler::ComposeCreatorWithUserId(
   _return = creator;
 
   span->End();
+  FlushTraces();
 }
 
 void UserHandler::Login(std::string &_return, int64_t req_id,
@@ -837,6 +841,7 @@ void UserHandler::Login(std::string &_return, int64_t req_id,
     }
   }
   span->End();
+  FlushTraces();
 }
 int64_t UserHandler::GetUserId(
     int64_t req_id, const std::string &username,
@@ -1004,6 +1009,7 @@ int64_t UserHandler::GetUserId(
   }
 
   span->End();
+  FlushTraces();
   return user_id;
 }
 

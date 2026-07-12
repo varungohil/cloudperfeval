@@ -144,6 +144,7 @@ void HomeTimelineHandler::WriteHomeTimeline(
     se.message = "Failed to connect to social-graph-service";
     followers_span->End();
     span->End();
+    FlushTraces();
     throw se;
   }
   auto social_graph_client = social_graph_client_wrapper->GetClient();
@@ -156,6 +157,7 @@ void HomeTimelineHandler::WriteHomeTimeline(
     _social_graph_client_pool->Remove(social_graph_client_wrapper);
     followers_span->End();
     span->End();
+    FlushTraces();
     throw;
   }
   _social_graph_client_pool->Keepalive(social_graph_client_wrapper);
@@ -185,6 +187,7 @@ void HomeTimelineHandler::WriteHomeTimeline(
         LOG(error) << err.what();
         redis_span->End();
         span->End();
+        FlushTraces();
         throw err;
       }
     }
@@ -202,6 +205,7 @@ void HomeTimelineHandler::WriteHomeTimeline(
             LOG(error) << err.what();
             redis_span->End();
             span->End();
+            FlushTraces();
             throw err;
         }
     }
@@ -244,6 +248,7 @@ void HomeTimelineHandler::WriteHomeTimeline(
   }
   redis_span->End();
   span->End();
+  FlushTraces();
 }
 
 

@@ -39,16 +39,33 @@ class JaegerAPI:
         body = self._get("/api/operations", params={"service": service}, timeout=30)
         return (body or {}).get("data") or []
 
-    def get_traces(self, service: str, minutes: int = 5, limit: int = 1000,
-                   operation: str | None = None,
-                   min_duration_ms: float | None = None) -> list:
-        params = {"service": service, "lookback": f"{int(minutes)}m", "limit": limit}
+    def get_traces(
+        self,
+        service: str,
+        minutes: int = 5,
+        limit: int = 1000,
+        operation: str | None = None,
+        min_duration_ms: float | None = None,
+        start_ts: float | None = None,
+        end_ts: float | None = None,
+    ) -> list:
+        time_params, _ = self.trace_time_params(
+            start_ts=start_ts, end_ts=end_ts, minutes=minutes,
+        )
+        params: dict = {"service": service, "limit": limit, **time_params}
+        if "start" not in params:
+            params["lookback"] = f"{int(minutes)}m"
         if operation:
             params["operation"] = operation
         if min_duration_ms is not None:
             params["minDuration"] = f"{min_duration_ms:g}ms"
         body = self._get("/api/traces", params=params)
-        return (body or {}).get("data") or []
+        traces = (body or {}).get("data") or []
+        if "start" in params:
+            traces = self._filter_traces_by_root_start(
+                traces, params["start"], params["end"],
+            )
+        return traces
 
     def traces_above_latency(
         self,
@@ -57,6 +74,8 @@ class JaegerAPI:
         minutes: int = 5,
         limit: int = 1000,
         operation: str | None = None,
+        start_ts: float | None = None,
+        end_ts: float | None = None,
     ) -> list:
         """Traces whose end-to-end (root span) latency is >= min_latency_ms."""
         traces = self.get_traces(
@@ -65,6 +84,8 @@ class JaegerAPI:
             limit=limit,
             operation=operation,
             min_duration_ms=min_latency_ms,
+            start_ts=start_ts,
+            end_ts=end_ts,
         )
         filtered = [
             t for t in traces
@@ -77,7 +98,7 @@ class JaegerAPI:
         body = self._get(f"/api/traces/{trace_id.strip()}")
         return (body or {}).get("data") or []
 
-    def get_dependency_graph(self, minutes: int = 30) -> dict:
+    def get_dependency_graph(self, minutes: int = 1440) -> dict:
         end_ts = int(datetime.now().timestamp() * 1000)
         params = {"endTs": end_ts, "lookback": int(minutes) * 60 * 1000}
         return self._get("/api/dependencies", params=params) or {}
@@ -105,10 +126,26 @@ class JaegerAPI:
                     children_dur[parent] = children_dur.get(parent, 0) + span.get("duration", 0)
         return children_dur
 
-    def summarize(self, service: str, minutes: int = 5, limit: int = 100) -> str:
-        traces = self.get_traces(service, minutes=minutes, limit=limit)
+    def summarize(
+        self,
+        service: str,
+        minutes: int = 5,
+        limit: int = 100,
+        start_ts: float | None = None,
+        end_ts: float | None = None,
+    ) -> str:
+        _, window = self.trace_time_params(
+            start_ts=start_ts, end_ts=end_ts, minutes=minutes,
+        )
+        traces = self.get_traces(
+            service,
+            minutes=minutes,
+            limit=limit,
+            start_ts=start_ts,
+            end_ts=end_ts,
+        )
         if not traces:
-            return f"(no traces found for service '{service}' in the last {minutes}m)"
+            return f"(no traces found for service '{service}' {window})"
 
         by_op: dict[str, list[int]] = {}
         by_op_self: dict[str, list[int]] = {}
@@ -193,6 +230,11 @@ class JaegerAPI:
         return max(by_service, key=by_service.get)
 
     @staticmethod
+    def oracle_vote_count(captured: int) -> int:
+        """Number of slowest traces included in the trace-oracle majority vote."""
+        return max(1, captured // 5)
+
+    @staticmethod
     def trace_root_duration_ms(trace: dict) -> float:
         """End-to-end duration of a trace = duration of its root span (ms)."""
         spans = trace.get("spans", [])
@@ -202,6 +244,49 @@ class JaegerAPI:
         if not roots:
             return 0.0
         return max(s.get("duration", 0) for s in roots) / 1000.0
+
+    @staticmethod
+    def trace_root_start_us(trace: dict) -> int | None:
+        """Root span start time in microseconds, or None if no root span."""
+        spans = trace.get("spans", [])
+        roots = [s for s in spans if not any(
+            r.get("refType") == "CHILD_OF" for r in s.get("references", [])
+        )]
+        if not roots:
+            return None
+        return min(s.get("startTime", 0) for s in roots)
+
+    @staticmethod
+    def trace_time_params(
+        start_ts: float | None,
+        end_ts: float | None,
+        minutes: int,
+    ) -> tuple[dict[str, int], str]:
+        """Jaeger ``start``/``end`` (microseconds) and a human window label."""
+        if start_ts is not None and end_ts is not None:
+            if start_ts >= end_ts:
+                raise ValueError("start_ts must be before end_ts")
+            start_us = int(start_ts * 1_000_000)
+            end_us = int(end_ts * 1_000_000)
+            return (
+                {"start": start_us, "end": end_us},
+                f"with root span start in [{start_ts:.0f}, {end_ts:.0f}] (epoch s)",
+            )
+        if start_ts is not None or end_ts is not None:
+            raise ValueError("start_ts and end_ts must both be set or both omitted")
+        return ({}, f"in the last {minutes}m")
+
+    @classmethod
+    def _filter_traces_by_root_start(
+        cls, traces: list, start_us: int, end_us: int,
+    ) -> list:
+        """Keep traces whose root span starts within [start_us, end_us]."""
+        filtered = []
+        for trace in traces:
+            root_start = cls.trace_root_start_us(trace)
+            if root_start is not None and start_us <= root_start <= end_us:
+                filtered.append(trace)
+        return filtered
 
     def capture_trace(self, trace_id: str) -> dict | None:
         """Summarize one trace by ID (e.g. from curl ``X-Trace-Id`` header)."""
@@ -213,22 +298,43 @@ class JaegerAPI:
         dur = self.trace_root_duration_ms(trace)
         return {
             "trace_ids": [tid],
+            "oracle_trace_ids": [tid],
             "p50_ms": dur,
             "p95_ms": dur,
             "sample_latencies_ms": [round(dur, 2)],
             "voted_bottleneck": self.bottleneck_service(trace),
         }
 
-    def capture_recent(self, service: str, minutes: int = 5, limit: int = 200) -> dict:
+    def capture_recent(
+        self,
+        service: str,
+        minutes: int = 5,
+        limit: int = 200,
+        start_ts: float | None = None,
+        end_ts: float | None = None,
+    ) -> dict:
         """Summarize traces produced by a recent workload run.
 
-        Returns trace_ids (slowest first), p50/p95 end-to-end latency in ms,
-        and the per-trace bottleneck service voted across the slowest traces.
+        Returns trace_ids (slowest first, up to ``limit``), oracle_trace_ids
+        (slowest ~20% used for the majority-vote bottleneck), p50/p95 end-to-end
+        latency in ms, and voted_bottleneck.
         """
-        traces = self.get_traces(service, minutes=minutes, limit=limit)
+        traces = self.get_traces(
+            service,
+            minutes=minutes,
+            limit=limit,
+            start_ts=start_ts,
+            end_ts=end_ts,
+        )
         if not traces:
-            return {"trace_ids": [], "p50_ms": None, "p95_ms": None,
-                    "sample_latencies_ms": [], "voted_bottleneck": None}
+            return {
+                "trace_ids": [],
+                "oracle_trace_ids": [],
+                "p50_ms": None,
+                "p95_ms": None,
+                "sample_latencies_ms": [],
+                "voted_bottleneck": None,
+            }
 
         rows = []
         for trace in traces:
@@ -237,14 +343,17 @@ class JaegerAPI:
         rows.sort(key=lambda r: r[1], reverse=True)
 
         latencies = [r[1] for r in rows]
+        vote_n = self.oracle_vote_count(len(rows))
+        vote_rows = rows[:vote_n]
         votes: dict[str, int] = {}
-        for _tid, _dur, trace in rows[: max(1, len(rows) // 5)]:  # slowest ~20%
+        for _tid, _dur, trace in vote_rows:
             b = self.bottleneck_service(trace)
             if b:
                 votes[b] = votes.get(b, 0) + 1
 
         return {
             "trace_ids": [r[0] for r in rows if r[0]],
+            "oracle_trace_ids": [r[0] for r in vote_rows if r[0]],
             "p50_ms": self._percentile(latencies, 50),
             "p95_ms": self._percentile(latencies, 95),
             "sample_latencies_ms": [round(x, 2) for x in latencies[:20]],

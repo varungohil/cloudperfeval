@@ -1,5 +1,17 @@
 """Fault injection (Pumba network delay / CPU stress)."""
 
-from cloudperfeval.fault.pumba import FaultSpec, PumbaInjector, faults_summary
+from cloudperfeval.fault.pumba import (
+    FaultInjectionError,
+    FaultSpec,
+    PumbaInjector,
+    faults_summary,
+    verify_pumba_log,
+)
 
-__all__ = ["FaultSpec", "PumbaInjector", "faults_summary"]
+__all__ = [
+    "FaultInjectionError",
+    "FaultSpec",
+    "PumbaInjector",
+    "faults_summary",
+    "verify_pumba_log",
+]

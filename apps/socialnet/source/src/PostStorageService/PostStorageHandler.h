@@ -86,6 +86,7 @@ void PostStorageHandler::StorePost(
     se.errorCode = ErrorCode::SE_MONGODB_ERROR;
     se.message = "Failed to pop a client from MongoDB pool";
     span->End();
+    FlushTraces();
     throw se;
   }
 
@@ -97,6 +98,7 @@ void PostStorageHandler::StorePost(
     se.message = "Failed to create collection user from DB user";
     mongoc_client_pool_push(_mongodb_client_pool, mongodb_client);
     span->End();
+    FlushTraces();
     throw se;
   }
 
@@ -177,6 +179,7 @@ void PostStorageHandler::StorePost(
     mongoc_collection_destroy(collection);
     mongoc_client_pool_push(_mongodb_client_pool, mongodb_client);
     span->End();
+    FlushTraces();
     throw se;
   }
 
@@ -185,6 +188,7 @@ void PostStorageHandler::StorePost(
   mongoc_client_pool_push(_mongodb_client_pool, mongodb_client);
 
   span->End();
+  FlushTraces();
 }
 
 void PostStorageHandler::ReadPost(
@@ -244,6 +248,7 @@ void PostStorageHandler::ReadPost(
     memcached_pool_push(_memcached_client_pool, memcached_client);
     get_span->End();
     span->End();
+    FlushTraces();
     throw se;
   }
   memcached_pool_push(_memcached_client_pool, memcached_client);
@@ -398,6 +403,7 @@ void PostStorageHandler::ReadPost(
   }
 
   span->End();
+  FlushTraces();
 }
 
 
@@ -444,6 +450,7 @@ void PostStorageHandler::ReadPosts(
     se.errorCode = ErrorCode::SE_THRIFT_HANDLER_ERROR;
     se.message = "Post_ids are duplicated";
     span->End();
+    FlushTraces();
     throw se;
   }
   std::map<int64_t, Post> return_map;
@@ -455,6 +462,7 @@ void PostStorageHandler::ReadPosts(
     se.errorCode = ErrorCode::SE_MEMCACHED_ERROR;
     se.message = "Failed to pop a client from memcached pool";
     span->End();
+    FlushTraces();
     throw se;
   }
 

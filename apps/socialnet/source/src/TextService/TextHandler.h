@@ -203,6 +203,7 @@ void TextHandler::ComposeText(
   _return.text = updated_text;
   _return.urls = target_urls;
   span->End();
+  FlushTraces();
 }
 
 }  // namespace social_network

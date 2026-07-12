@@ -43,8 +43,8 @@ fault_settle_seconds: 5        # wait after injecting before generating load
 # Use the full path — the loadgen node may not have wrk on PATH.
 loadgen_host: node-19
 # wrk runs on loadgen_host (node-19); paths must exist there, not on the manager.
-wrk_cwd: /users/varuncg/DeathStarBench/socialNetwork-tail
-wrk_bin: ../wrk2/wrk
+wrk_cwd: /users/varuncg/cloudperfeval/apps/wrk2
+wrk_bin: /users/varuncg/cloudperfeval/apps/wrk2/wrk
 wrk_ulimit_n: 65536
 wrk_distribution: exp
 

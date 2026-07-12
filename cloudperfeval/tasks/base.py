@@ -61,5 +61,5 @@ class PerformanceTask:
         results["duration_sec"] = round(duration, 2)
         results["fault_type"] = ground_truth.fault_type
         results["workload_p95_ms"] = workload_result.p95_ms
-        results["reference_trace_ids"] = ground_truth.reference_trace_ids[:3]
+        results["reference_trace_ids"] = ground_truth.reference_trace_ids
         return results

@@ -187,6 +187,7 @@ void UrlShortenHandler::ComposeUrls(
 
   _return = target_urls;
   span->End();
+  FlushTraces();
 
 }
 

@@ -125,6 +125,7 @@ int64_t UniqueIdHandler::ComposeUniqueId(
   LOG(debug) << "The post_id of the request " << req_id << " is " << post_id;
 
   span->End();
+  FlushTraces();
   return post_id;
 }
 

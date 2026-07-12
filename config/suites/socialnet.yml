@@ -17,8 +17,8 @@ node_host_map: {}
 node_domain_suffix: perfdebug.ragger-pg0.apt.emulab.net
 pumba_bin: /users/varuncg/bin/pumba
 loadgen_host: node-19
-wrk_cwd: /users/varuncg/DeathStarBench/socialNetwork-tail
-wrk_bin: ../wrk2/wrk
+wrk_cwd: /users/varuncg/cloudperfeval/apps/wrk2
+wrk_bin: /users/varuncg/cloudperfeval/apps/wrk2/wrk
 wrk_ulimit_n: 65536
 wrk_distribution: exp
 fault_settle_seconds: 30

@@ -1,14 +1,14 @@
 """Drive load against the application and capture the resulting symptoms.
 
 Two modes:
-  - "single"    : one curl request to an endpoint (good for trace-localization
-                  tasks where the agent is handed a specific trace ID).
+  - "single"    : one curl request to an endpoint (good for single-request
+                  service diagnosis tasks where the agent is handed a trace ID).
   - "sustained" : a wrk run for N seconds at a target rate (good for
-                  endpoint-regression tasks measured by p95).
+                  sustained-request service diagnosis tasks measured by p95).
 
 After load, wait ``jaeger_ingest_seconds`` then capture from Jaeger. For
 ``mode=single``, the trace ID is taken from the curl ``X-Trace-Id`` header;
-if missing or not found after the wait, capture is empty (no fallback).
+if missing or not found after the wait, raises ``TraceCaptureError`` (no fallback).
 
 Use ``defer_jaeger=True`` to send load only (curl/wrk) without sleeping or
 querying Jaeger — for ``run.py --phase snapshot``.
@@ -26,6 +26,10 @@ from typing import Literal
 from cloudperfeval.config import config
 from cloudperfeval.observer.traces import JaegerAPI
 from cloudperfeval.shell import Shell
+
+
+class TraceCaptureError(RuntimeError):
+    """Single-request workload failed to capture the correlation trace in Jaeger."""
 
 
 @dataclass
@@ -73,10 +77,11 @@ class WorkloadSpec:
 class WorkloadResult:
     spec_summary: str
     trace_ids: list[str] = field(default_factory=list)
+    oracle_trace_ids: list[str] = field(default_factory=list)  # slowest ~20% used by oracle
     p50_ms: float | None = None
     p95_ms: float | None = None
     sample_latencies_ms: list[float] = field(default_factory=list)
-    voted_bottleneck: str | None = None      # oracle hint (NOT shown to agent)
+    voted_bottleneck: str | None = None      # majority-vote trace oracle (NOT shown to agent)
     raw_loadgen_output: str = ""
     correlation_trace_id: str | None = None    # from curl X-Trace-Id before Jaeger capture
     load_start_ts: float | None = None         # epoch seconds, load (curl/wrk) start
@@ -99,14 +104,6 @@ _TRACE_ID_HEADER = re.compile(
     r"^x-trace-id:\s*([0-9a-fA-F]+)\s*$", re.MULTILINE | re.IGNORECASE,
 )
 _CURL_META_MARKER = "\n__CPE_META__"
-
-_EMPTY_CAPTURE = {
-    "trace_ids": [],
-    "p50_ms": None,
-    "p95_ms": None,
-    "sample_latencies_ms": [],
-    "voted_bottleneck": None,
-}
 
 
 class WorkloadGenerator:
@@ -189,7 +186,12 @@ class WorkloadGenerator:
         return raw
 
     def _capture_after_wait(
-        self, spec: WorkloadSpec, raw: str, correlation_trace_id: str | None,
+        self,
+        spec: WorkloadSpec,
+        raw: str,
+        correlation_trace_id: str | None,
+        load_start_ts: float | None = None,
+        load_end_ts: float | None = None,
     ) -> dict:
         print(f"[LOAD] Waiting {self.ingest_wait}s for Jaeger ingest")
         time.sleep(self.ingest_wait)
@@ -197,19 +199,21 @@ class WorkloadGenerator:
             if correlation_trace_id:
                 captured = self.jaeger.capture_trace(correlation_trace_id)
                 if not captured:
-                    print(
-                        f"[LOAD] X-Trace-Id {correlation_trace_id} not in Jaeger; "
-                        "no trace captured (no fallback)"
+                    raise TraceCaptureError(
+                        f"Jaeger has no trace for X-Trace-Id {correlation_trace_id!r} "
+                        f"after {self.ingest_wait}s ingest wait"
                     )
-                    return _EMPTY_CAPTURE
                 return captured
-            print("[LOAD] No X-Trace-Id in curl response; no trace captured")
-            return _EMPTY_CAPTURE
-        return self.jaeger.capture_recent(
-            spec.trace_service,
-            minutes=config.get("trace_lookback_minutes", 5),
-            limit=config.get("trace_capture_limit", 200),
-        )
+            raise TraceCaptureError("curl response had no X-Trace-Id header")
+        capture_kwargs: dict = {
+            "limit": config.get("trace_capture_limit", 200),
+        }
+        if load_start_ts is not None and load_end_ts is not None:
+            capture_kwargs["start_ts"] = load_start_ts
+            capture_kwargs["end_ts"] = load_end_ts
+        else:
+            capture_kwargs["minutes"] = config.get("trace_lookback_minutes", 5)
+        return self.jaeger.capture_recent(spec.trace_service, **capture_kwargs)
 
     def run(self, spec: WorkloadSpec, *, defer_jaeger: bool = False) -> WorkloadResult:
         print(f"[LOAD] Running {spec.summary()}")
@@ -238,10 +242,13 @@ class WorkloadGenerator:
                 load_end_ts=load_end_ts,
             )
 
-        captured = self._capture_after_wait(spec, raw, correlation_trace_id)
+        captured = self._capture_after_wait(
+            spec, raw, correlation_trace_id, load_start_ts, load_end_ts,
+        )
         result = WorkloadResult(
             spec_summary=spec.summary(),
             trace_ids=captured["trace_ids"],
+            oracle_trace_ids=captured["oracle_trace_ids"],
             p50_ms=captured["p50_ms"],
             p95_ms=captured["p95_ms"],
             sample_latencies_ms=captured["sample_latencies_ms"],
@@ -251,7 +258,8 @@ class WorkloadGenerator:
             load_start_ts=load_start_ts,
             load_end_ts=load_end_ts,
         )
-        print(f"[LOAD] Captured {len(result.trace_ids)} traces; "
+        print(f"[LOAD] Captured {len(result.trace_ids)} traces "
+              f"({len(result.oracle_trace_ids)} for oracle vote); "
               f"p95={result.p95_ms}ms; oracle_hint={result.voted_bottleneck}")
         return result
 
@@ -260,10 +268,13 @@ class WorkloadGenerator:
         load_start_ts: float | None = None, load_end_ts: float | None = None,
     ) -> WorkloadResult:
         """Jaeger capture for a load already sent in ``--phase snapshot``."""
-        captured = self._capture_after_wait(spec, raw, correlation_trace_id)
+        captured = self._capture_after_wait(
+            spec, raw, correlation_trace_id, load_start_ts, load_end_ts,
+        )
         result = WorkloadResult(
             spec_summary=spec.summary(),
             trace_ids=captured["trace_ids"],
+            oracle_trace_ids=captured["oracle_trace_ids"],
             p50_ms=captured["p50_ms"],
             p95_ms=captured["p95_ms"],
             sample_latencies_ms=captured["sample_latencies_ms"],
@@ -273,6 +284,7 @@ class WorkloadGenerator:
             load_start_ts=load_start_ts,
             load_end_ts=load_end_ts,
         )
-        print(f"[LOAD] Captured {len(result.trace_ids)} traces; "
+        print(f"[LOAD] Captured {len(result.trace_ids)} traces "
+              f"({len(result.oracle_trace_ids)} for oracle vote); "
               f"p95={result.p95_ms}ms; oracle_hint={result.voted_bottleneck}")
         return result
