@@ -4,20 +4,46 @@ This is the execution engine described in the design. `init_problem(problem_id)`
 sets up the environment (fault + workload) and returns the agent-facing prompt;
 `run(max_steps)` drives the turn-based agent loop and, on a valid submission,
 grades it with `problem.eval(...)`. The fault is always recovered in `finally`.
+
+Coding agents (`codex`, `claude-code`) use an autonomous SREGym-style path:
+they receive one instruction, investigate via Bash + `python -m
+cloudperfeval.tools.call`, write submission.json, and the orchestrator grades it.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from cloudperfeval.actions import SwarmActions, get_actions_doc
+from cloudperfeval.agents.docker_proxy import DockerReadOnlyProxy
+from cloudperfeval.agents.sandbox import prepare_sandbox_paths, sandbox_enabled
+from cloudperfeval.config import config
 from cloudperfeval.parser import ResponseParser
 from cloudperfeval.problems.registry import ProblemRegistry
-from cloudperfeval.session import Session
+from cloudperfeval.session import Session, problem_short_name
 from cloudperfeval.status import (
     InvalidActionError,
     ResponseParsingError,
     SessionPrint,
     SubmissionStatus,
 )
+from cloudperfeval.tools.dispatch import tool_env_for_session
+
+
+def _apply_agent_usage(results: dict, agent) -> None:
+    """Copy accumulated LLM token usage onto results (same pattern as duration_sec)."""
+    usage = getattr(agent, "usage", None)
+    if not isinstance(usage, dict):
+        return
+    for key in (
+        "prompt_tokens",
+        "completion_tokens",
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+    ):
+        if key in usage:
+            results.setdefault(key, usage[key])
 
 
 class Orchestrator:
@@ -128,6 +154,12 @@ class Orchestrator:
     # ---- main loop -------------------------------------------------------
     async def run(self, max_steps: int) -> dict:
         assert self.session is not None and self.problem is not None
+        if getattr(self.agent, "autonomous", False):
+            return await self._run_autonomous(max_steps)
+        return await self._run_turn_based(max_steps)
+
+    async def _run_turn_based(self, max_steps: int) -> dict:
+        assert self.session is not None and self.problem is not None
         action_instr = "Please take the next action"
         env_response, results = "", {}
         step = 0
@@ -163,6 +195,99 @@ class Orchestrator:
             self.session.end()
             results.setdefault("steps", step + 1)
             results.setdefault("duration_sec", round(self.session.get_duration(), 2))
+            _apply_agent_usage(results, self.agent)
+            self.session.set_results(results)
+            self.sprint.result(results)
+            print(f"[ENV] Recovering fault for '{self.problem.problem_id}'")
+            self.problem.teardown()
+
+        return {
+            "history": self.session.history,
+            "final_state": env_response,
+            "results": results,
+        }
+
+    async def _run_autonomous(self, max_steps: int) -> dict:
+        """Hand control to a coding agent (Claude Code / Codex) until submit/exit."""
+        assert self.session is not None and self.problem is not None and self.agent is not None
+
+        results_dir = Path(config.get("results_dir", "./results")).resolve()
+        workdir = (
+            results_dir
+            / "agent_workdirs"
+            / f"{problem_short_name(self.problem.problem_id)}_{self.session.session_id}"
+        ).resolve()
+        workdir.mkdir(parents=True, exist_ok=True)
+        submission_file = (workdir / "submission.json").resolve()
+        tool_env = tool_env_for_session(submission_file=submission_file)
+        docker_proxy: DockerReadOnlyProxy | None = None
+        if sandbox_enabled():
+            sandbox_paths = prepare_sandbox_paths(workdir)
+            manager_host = config.get("manager_host", "localhost")
+            if manager_host != "localhost":
+                raise RuntimeError(
+                    "tool-less sandbox mode requires manager_host=localhost "
+                    "for the read-only Docker API proxy"
+                )
+            docker_proxy = DockerReadOnlyProxy(sandbox_paths.gateway_dir).start()
+            tool_env = {
+                "CPE_PROMETHEUS_URL": str(config.get("prometheus_url", "")),
+                "CPE_JAEGER_URL": str(config.get("jaeger_url", "")),
+                "CPE_STACK_NAME": str(config.get("stack_name", "")),
+            }
+
+        print(f"[ENV] Autonomous agent workdir: {workdir}")
+        if docker_proxy is not None:
+            print("[ENV] Agent filesystem sandbox: tool-less direct investigation")
+
+        env_response: str = ""
+        results: dict = {}
+        self.session.start()
+        try:
+            outcome = await self.agent.run_autonomous(
+                workdir=workdir,
+                tool_env=tool_env,
+                max_steps=max_steps,
+            )
+            for item in getattr(outcome, "history", None) or []:
+                self.session.add(item)
+            if outcome.stdout:
+                self.sprint.agent(outcome.stdout)
+            if outcome.stderr:
+                self.session.add({"role": "env", "content": f"[stderr]\n{outcome.stderr}"})
+
+            solution = outcome.solution
+            if solution is not None:
+                self.session.set_solution(solution)
+                results = self.problem.eval(
+                    self.session.solution,
+                    self.session.history,
+                    self.session.get_duration(),
+                )
+                results["submission"] = "valid"
+                env_response = SubmissionStatus.VALID_SUBMISSION.name
+            else:
+                results = {"submission": "none", "success": False}
+                env_response = "no submission"
+                if outcome.timed_out:
+                    results["error"] = "agent timed out before submit"
+                    env_response = "timeout"
+                elif outcome.returncode not in (0, None):
+                    results["error"] = (
+                        f"agent exited with code {outcome.returncode}"
+                    )
+
+            results["agent_workdir"] = str(workdir)
+            results["agent_returncode"] = outcome.returncode
+            if outcome.timed_out:
+                results["timed_out"] = True
+        finally:
+            if docker_proxy is not None:
+                docker_proxy.stop()
+            self.session.end()
+            results.setdefault("steps", max_steps)
+            results.setdefault("duration_sec", round(self.session.get_duration(), 2))
+            _apply_agent_usage(results, self.agent)
             self.session.set_results(results)
             self.sprint.result(results)
             print(f"[ENV] Recovering fault for '{self.problem.problem_id}'")

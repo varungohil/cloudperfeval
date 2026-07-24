@@ -1,4 +1,4 @@
-"""Agent backends for the turn-based orchestrator."""
+"""Agent backends for the orchestrator (manual, llm, codex, claude-code)."""
 
 from cloudperfeval.agents.factory import AGENT_CHOICES, create_agent
 

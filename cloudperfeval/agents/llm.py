@@ -38,16 +38,45 @@ class LLMAgent:
         api_key = os.getenv("OPENAI_API_KEY", "EMPTY")
         self.client = OpenAI(api_key=api_key, base_url=base_url) if base_url else OpenAI(api_key=api_key)
         self.history: list[dict] = []
+        self.usage = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+        }
 
     def init_context(self, problem_desc: str, instructions: str, apis: dict[str, str]):
+        self.history = []
+        self.usage = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+        }
         self.history.append({"role": "system", "content": build_system_message(problem_desc, apis)})
         self.history.append({"role": "user", "content": instructions})
+
+    def _record_usage(self, response) -> None:
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            return
+        prompt = int(getattr(usage, "prompt_tokens", 0) or 0)
+        completion = int(getattr(usage, "completion_tokens", 0) or 0)
+        total = int(getattr(usage, "total_tokens", 0) or 0) or (prompt + completion)
+        self.usage["prompt_tokens"] += prompt
+        self.usage["completion_tokens"] += completion
+        self.usage["input_tokens"] += prompt
+        self.usage["output_tokens"] += completion
+        self.usage["total_tokens"] += total
 
     async def get_action(self, input_text: str) -> str:
         self.history.append({"role": "user", "content": input_text + "\n\n" + RESP_INSTR})
         response = self.client.chat.completions.create(
             **_completion_kwargs(self.model, self.history)
         )
+        self._record_usage(response)
         content = response.choices[0].message.content
         self.history.append({"role": "assistant", "content": content})
         return content

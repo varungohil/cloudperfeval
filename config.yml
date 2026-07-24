@@ -31,6 +31,9 @@ suites:
 # build "<node>.<suffix>". Leave both empty for single-node/local setups.
 # Use the full path — worker nodes may not have pumba on PATH.
 pumba_bin: /users/varuncg/bin/pumba
+# Host stress-ng for icache_burst (auto-extracted from stress_ng_image if missing).
+stress_ng_bin: /users/varuncg/bin/stress-ng
+stress_ng_image: ghcr.io/alexei-led/stress-ng:latest
 node_host_map: {}
 #   node-1: node-1.perfdebug.ragger-pg0.apt.emulab.net
 #   node-4: node-4.perfdebug.ragger-pg0.apt.emulab.net
@@ -59,3 +62,22 @@ trace_capture_limit: 200
 print_session: true
 shell_timeout: 30
 results_dir: ./results
+
+# --- Autonomous coding-agent filesystem isolation ---
+# Build with:
+#   docker build -f docker/agent-sandbox/Dockerfile -t cpe-agent-sandbox:latest .
+# When enabled, Claude/Codex run with a read-only root filesystem. Only the
+# current run's results/agent_workdirs/<run>/scratch directory is writable.
+agent_sandbox:
+  enabled: true
+  runtime: docker
+  image: cpe-agent-sandbox:latest
+  cpus: 4
+  memory_limit: 4g
+  pids_limit: 512
+  # Agent API access requires networking. Sandboxed agents receive no CPE tools.
+  # They query Prometheus/Jaeger URLs directly and inspect Swarm state through a
+  # GET-only Docker API proxy. The raw Docker socket is never mounted.
+  network: bridge
+  claude_bin: claude
+  codex_bin: codex

@@ -1,10 +1,12 @@
 """Bottleneck localization scoring.
 
-The primary score is an exact match of the agent's `root_cause_service` against
-the ground-truth bottleneck. As a cross-check we also run a programmatic
-trace oracle (majority vote of per-trace bottleneck services across the
-slowest captured traces) so a run can pass if the agent agrees with the observed
-data even when ground-truth naming differs slightly.
+Single-fault service diagnosis: exact match of `root_cause_service` against the
+ground-truth bottleneck, plus a trace-oracle cross-check (majority vote over
+the slowest captured traces).
+
+Multi-fault problems: exact set match of submitted faults against
+``GroundTruth.expected_faults`` (see ``evaluators.faults``); the trace oracle
+is not used.
 
 Ground truth is never shown to the agent — it lives on the Problem and is only
 consumed here.
@@ -17,6 +19,14 @@ from dataclasses import dataclass, field
 from cloudperfeval.observer.traces import JaegerAPI
 
 
+_RESOURCE_ALIASES = {
+    "cpu": {"cpu"},
+    "mem": {"mem", "memory", "ram"},
+    "network": {"network", "net", "networking", "bandwidth"},
+    "disk": {"disk", "io", "storage", "disk_io"},
+}
+
+
 @dataclass
 class GroundTruth:
     bottleneck_service: str           # primary bottleneck (graded answer)
@@ -25,7 +35,8 @@ class GroundTruth:
     endpoint: str
     reference_trace_ids: list[str] = field(default_factory=list)  # slowest ~20% used by oracle
     trace_oracle_service: str | None = None   # voted_bottleneck from workload capture
-    fault_targets: list[str] = field(default_factory=list)  # all injected services
+    fault_targets: list[str] = field(default_factory=list)  # graded fault targets
+    decoy_targets: list[str] = field(default_factory=list)  # injected but not graded
     aliases: list[str] = field(default_factory=list)
     # resource_diagnosis grading (cpu | mem | network | disk)
     bottleneck_resource: str | None = None
@@ -33,6 +44,8 @@ class GroundTruth:
     network_to_service: str | None = None
     network_from_aliases: list[str] = field(default_factory=list)
     network_to_aliases: list[str] = field(default_factory=list)
+    # Graded faults for set-match (excludes decoys).
+    expected_faults: list[dict] = field(default_factory=list)
 
 
 def normalize_service(name) -> str:
@@ -47,6 +60,16 @@ def normalize_service(name) -> str:
     return n.rstrip("-_ ")
 
 
+def normalize_resource(name) -> str:
+    if not isinstance(name, str):
+        return ""
+    n = name.strip().lower().replace(" ", "_")
+    for canonical, aliases in _RESOURCE_ALIASES.items():
+        if n == canonical or n in aliases:
+            return canonical
+    return n
+
+
 def _accepted_names(gt: GroundTruth) -> set[str]:
     names = {gt.bottleneck_service, *gt.aliases}
     return {normalize_service(n) for n in names if n}
@@ -55,7 +78,15 @@ def _accepted_names(gt: GroundTruth) -> set[str]:
 def eval_localization(soln, gt: GroundTruth) -> dict:
     """Exact-match the agent's predicted service against ground truth."""
     if isinstance(soln, dict):
-        predicted = soln.get("root_cause_service") or soln.get("bottleneck_service")
+        if isinstance(soln.get("faults"), list) and soln["faults"]:
+            first = soln["faults"][0] if isinstance(soln["faults"][0], dict) else {}
+            predicted = (
+                first.get("root_cause_service")
+                or first.get("service")
+                or first.get("bottleneck_service")
+            )
+        else:
+            predicted = soln.get("root_cause_service") or soln.get("bottleneck_service")
     elif isinstance(soln, str):
         predicted = soln
     else:
@@ -87,7 +118,15 @@ def bottleneck_from_trace(jaeger: JaegerAPI, trace_id: str) -> str | None:
 
 
 def eval_with_trace_oracle(soln, gt: GroundTruth, jaeger: JaegerAPI) -> dict:
-    """Exact match plus a trace-oracle cross-check; success if either agrees."""
+    """Grade service diagnosis; multi-fault uses set match (no trace oracle)."""
+    if len(gt.expected_faults) > 1:
+        from cloudperfeval.evaluators.faults import eval_faults_set
+
+        result = eval_faults_set(soln, gt)
+        if gt.fault_targets:
+            result["fault_targets"] = gt.fault_targets
+        return result
+
     result = eval_localization(soln, gt)
 
     oracle_service = gt.trace_oracle_service
@@ -107,3 +146,4 @@ def eval_with_trace_oracle(soln, gt: GroundTruth, jaeger: JaegerAPI) -> dict:
     if gt.fault_targets:
         result["fault_targets"] = gt.fault_targets
     return result
+

@@ -3,28 +3,20 @@
 For CPU/mem/disk faults the agent submits the bottleneck resource and service.
 For network faults the agent submits the resource plus a from/to service pair
 (the starting and ending services on the congested path).
+
+Multi-fault problems (``len(expected_faults) > 1``) are graded by exact set
+match. Single-fault submissions keep the legacy flat schema (or a one-element
+``faults`` list) and alias-aware matching.
 """
 
 from __future__ import annotations
 
-from cloudperfeval.evaluators.bottleneck import GroundTruth, normalize_service
-
-_RESOURCE_ALIASES = {
-    "cpu": {"cpu"},
-    "mem": {"mem", "memory", "ram"},
-    "network": {"network", "net", "networking", "bandwidth"},
-    "disk": {"disk", "io", "storage", "disk_io"},
-}
-
-
-def normalize_resource(name) -> str:
-    if not isinstance(name, str):
-        return ""
-    n = name.strip().lower().replace(" ", "_")
-    for canonical, aliases in _RESOURCE_ALIASES.items():
-        if n == canonical or n in aliases:
-            return canonical
-    return n
+from cloudperfeval.evaluators.bottleneck import (
+    GroundTruth,
+    normalize_resource,
+    normalize_service,
+)
+from cloudperfeval.evaluators.faults import eval_faults_set, parse_submitted_faults
 
 
 def _accepted_service_names(*names: str | None, aliases: list[str] | None = None) -> set[str]:
@@ -34,18 +26,8 @@ def _accepted_service_names(*names: str | None, aliases: list[str] | None = None
     return {normalize_service(n) for n in values if n}
 
 
-def eval_resource_diagnosis(soln, gt: GroundTruth) -> dict:
-    """Grade a resource-diagnosis submission against ground truth."""
-    if not isinstance(soln, dict):
-        return {
-            "success": False,
-            "resource_exact": False,
-            "service_exact": False,
-            "predicted_resource": None,
-            "expected_resource": gt.bottleneck_resource,
-            "error": "invalid_submission",
-        }
-
+def _eval_single_resource(soln: dict, gt: GroundTruth) -> dict:
+    """Grade a single resource-diagnosis object against primary ground truth."""
     predicted_resource = normalize_resource(
         soln.get("resource") or soln.get("bottleneck_resource")
     )
@@ -113,3 +95,38 @@ def eval_resource_diagnosis(soln, gt: GroundTruth) -> dict:
         "predicted_service": predicted_service,
         "expected_service": gt.bottleneck_service,
     }
+
+
+def eval_resource_diagnosis(soln, gt: GroundTruth) -> dict:
+    """Grade a resource-diagnosis submission against ground truth."""
+    if len(gt.expected_faults) > 1:
+        return eval_faults_set(soln, gt)
+
+    if not isinstance(soln, dict):
+        return {
+            "success": False,
+            "resource_exact": False,
+            "service_exact": False,
+            "predicted_resource": None,
+            "expected_resource": gt.bottleneck_resource,
+            "error": "invalid_submission",
+        }
+
+    faults = parse_submitted_faults(soln)
+    if faults is not None and "faults" in soln:
+        if len(faults) == 1:
+            return _eval_single_resource(faults[0], gt)
+        # Wrong cardinality for a single-fault problem — still score as set match
+        # when expected_faults is available.
+        if gt.expected_faults:
+            return eval_faults_set(soln, gt)
+        return {
+            "success": False,
+            "resource_exact": False,
+            "service_exact": False,
+            "predicted_resource": None,
+            "expected_resource": gt.bottleneck_resource,
+            "error": "expected_single_fault",
+        }
+
+    return _eval_single_resource(soln, gt)

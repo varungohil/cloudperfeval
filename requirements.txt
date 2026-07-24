@@ -3,5 +3,7 @@ requests>=2.31
 colorama>=0.4.6
 # Optional: only needed for the LLM agent
 openai>=1.30
+# Optional: only needed for --agent codex / claude-code (MCP tool server)
+mcp>=1.0
 # Optional: only needed when manager_host/node hosts are remote (SSH)
 paramiko>=3.4

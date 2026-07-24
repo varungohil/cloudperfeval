@@ -1,40 +1,58 @@
-"""Pumba-based fault injection for Docker Swarm.
+"""Fault injection for Docker Swarm (Pumba + connection-pool limits).
 
-A `FaultSpec` describes *what* to inject (delay or cpu stress) and *which*
-service to target. `PumbaInjector` runs the `pumba` CLI on the node hosting the
-target task (resolved from Swarm placement), tracks the background process so it
-can be stopped on recover, and cleans up leftovers.
+A `FaultSpec` describes *what* to inject and *which* service to target.
+Supported fault types:
+  - ``delay`` / ``cpu`` / ``icache``: Pumba on the node hosting the target task
+  - ``icache_burst``: host ``stress-ng --icache`` burst+sleep loop pinned to the
+    core running the target task (lower average CPU than continuous Pumba stress)
+  - ``connections``: shrink a Thrift/client pool in ``service-config.json`` for
+    ``target_service`` toward ``peer_service`` (Seer Case B–style backpressure).
+    Optional ``also_restart`` force-updates parent/caller services after the
+    target config swap so they drop stale VIP/Thrift connections.
 
 Network delay supports optional scoping:
   - `peer_service`: delay only egress from `target_service` toward that peer
     (pumba netem `--target <peer-ip>`; CIDR suffixes from Swarm are stripped).
   - `egress_port` / `ingress_port`: limit delay to matching source/dest ports.
 
+``cpu`` and ``icache`` run a stress-ng sidecar under the target container's
+cgroup via ``pumba stress`` (``--cpu`` / ``--icache`` stressors). This competes
+for the target's CPU quota; microarchitectural interference (including L1i
+thrashing) is incidental to shared scheduling, not explicit core pinning.
+
 For netem faults the egress interface is auto-detected by running
 `ip route get <peer-ip>` inside the target task's network namespace (Swarm
 overlay traffic often uses eth2, not Pumba's default eth0).
 
 Prerequisite: `pumba` must be installed on every Swarm node (with `tc`/iproute2
-for netem faults). The harness does not run Pumba inside Docker.
+for netem faults). ``icache_burst`` requires ``stress-ng`` on worker nodes.
+The harness does not run Pumba inside Docker.
 
 Pumba reference:
   net delay : pumba netem [--target IP] [--egress-port P] [--ingress-port P]
               --duration D delay --time MS <source-containers>
-  stress cpu: pumba stress --duration D --stressors "..." <target>
+  stress    : pumba stress --duration D --stressors "..." <target>
 """
 
 from __future__ import annotations
 
+import json
 import os
 import re
+import tempfile
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Literal
 
 from cloudperfeval.config import config
 from cloudperfeval.shell import Shell
 from cloudperfeval.swarm import SwarmCtl
+
+_SERVICE_CONFIG_MOUNT = (
+    "/social-network-microservices/config/service-config.json"
+)
 
 
 class FaultInjectionError(RuntimeError):
@@ -46,10 +64,14 @@ _PUMBA_LOG_FAIL = (
     re.compile(r"level=error\b"),
     re.compile(r"level=fatal\b"),
 )
+_STRESS_LOG_OK = re.compile(r'level=info msg="stress testing container"')
 _PUMBA_LOG_OK = {
     "delay": re.compile(r'level=info msg="running netem on container"'),
-    "cpu": re.compile(r'level=info msg="stress testing container"'),
+    "cpu": _STRESS_LOG_OK,
+    "icache": _STRESS_LOG_OK,
 }
+_ICACHE_BURST_LOG_OK = re.compile(r"\[FAULT\] icache burst loop started")
+_STRESS_FAULT_TYPES = frozenset({"cpu", "icache"})
 _PUMBA_CONTAINER_NAME = re.compile(r"name=(/\S+)")
 _ROUTE_DEV_RE = re.compile(r"(?:\d+\.\d+\.\d+\.\d+|default)\s+dev\s+(\S+)")
 
@@ -93,10 +115,23 @@ def verify_pumba_log(log: str, spec: FaultSpec) -> None:
         )
 
 
+def verify_icache_burst_log(log: str, spec: FaultSpec) -> None:
+    """Raise FaultInjectionError when the burst loop did not start or run."""
+    text = log.strip()
+    if not text or not _ICACHE_BURST_LOG_OK.search(text):
+        raise FaultInjectionError(
+            f"icache burst log for {spec.summary()} missing start marker: {text!r}"
+        )
+    if re.search(r"command not found|No such file|cannot execute", text, re.I):
+        raise FaultInjectionError(
+            f"icache burst stress-ng failed for {spec.summary()}: {text}"
+        )
+
+
 @dataclass
 class FaultSpec:
-    fault_type: Literal["delay", "cpu"]
-    target_service: str          # source service (delay egress from its containers)
+    fault_type: Literal["delay", "cpu", "icache", "icache_burst", "connections"]
+    target_service: str          # source service (delay egress / pool owner)
 
     # network delay params
     delay_ms: int = 300
@@ -106,22 +141,69 @@ class FaultSpec:
     egress_port: int | str | None = None  # pumba --egress-port (source port(s))
     ingress_port: int | str | None = None # pumba --ingress-port (dest port(s))
 
-    # cpu stress params
+    # stress-ng params (cpu / icache / icache_burst)
     cpu_workers: int = 2
+    icache_workers: int = 2
+    icache_burst_ms: int = 50
+    icache_sleep_ms: int = 200
+
+    # connection-pool limit params (service-config.json ClientPool max size)
+    connections: int = 1
+    # After the target service is restarted for a connections fault, also
+    # force-update these caller/parent services so they drop stale VIP/Thrift
+    # connections (otherwise e.g. frontend keeps hitting a dead home-timeline).
+    also_restart: list[str] = field(default_factory=list)
 
     # common
     duration: str = "10m"
     pumba_bin: str = ""
+    # Injected for red-herring telemetry, but excluded from ground truth /
+    # grading. Use for off-path stress that should not affect endpoint latency.
+    decoy: bool = False
 
     def __post_init__(self) -> None:
-        if self.fault_type != "delay" and (
-            self.peer_service or self.egress_port is not None or self.ingress_port is not None
+        if self.fault_type in _STRESS_FAULT_TYPES and (
+            self.peer_service
+            or self.egress_port is not None
+            or self.ingress_port is not None
         ):
             raise ValueError(
                 "peer_service and port filters are only valid for delay faults"
             )
+        if self.fault_type == "cpu" and self.cpu_workers < 1:
+            raise ValueError("cpu_workers must be >= 1")
+        if self.fault_type == "icache" and self.icache_workers < 1:
+            raise ValueError("icache_workers must be >= 1")
+        if self.fault_type == "icache_burst":
+            if self.icache_workers < 1:
+                raise ValueError("icache_workers must be >= 1")
+            if self.icache_burst_ms < 1:
+                raise ValueError("icache_burst_ms must be >= 1")
+            if self.icache_sleep_ms < 0:
+                raise ValueError("icache_sleep_ms must be >= 0")
+            if (
+                self.peer_service
+                or self.egress_port is not None
+                or self.ingress_port is not None
+            ):
+                raise ValueError(
+                    "peer_service and port filters are only valid for delay faults"
+                )
+        if self.fault_type == "connections":
+            if not self.peer_service:
+                raise ValueError(
+                    "peer_service is required for connections faults "
+                    "(config key whose client-pool size is reduced)"
+                )
+            if self.connections < 1:
+                raise ValueError("connections must be >= 1")
+            if self.egress_port is not None or self.ingress_port is not None:
+                raise ValueError(
+                    "port filters are only valid for delay faults"
+                )
 
     def summary(self) -> str:
+        decoy_note = " [decoy]" if self.decoy else ""
         if self.fault_type == "delay":
             scope = (
                 f"{self.target_service} -> {self.peer_service}"
@@ -136,9 +218,28 @@ class FaultSpec:
             port_note = f" ({', '.join(ports)})" if ports else ""
             return (
                 f"network delay {self.delay_ms}ms (jitter {self.jitter_ms}ms) "
-                f"on {scope}{port_note}"
+                f"on {scope}{port_note}{decoy_note}"
             )
-        return f"cpu stress {self.cpu_workers} worker(s) on {self.target_service}"
+        if self.fault_type == "connections":
+            return (
+                f"client-pool connections={self.connections} on "
+                f"{self.target_service} -> {self.peer_service}{decoy_note}"
+            )
+        if self.fault_type == "icache":
+            return (
+                f"icache stress {self.icache_workers} worker(s) on "
+                f"{self.target_service}{decoy_note}"
+            )
+        if self.fault_type == "icache_burst":
+            return (
+                f"icache burst {self.icache_workers} worker(s), "
+                f"{self.icache_burst_ms}ms burst / {self.icache_sleep_ms}ms sleep, "
+                f"pinned to {self.target_service} core{decoy_note}"
+            )
+        return (
+            f"cpu stress {self.cpu_workers} worker(s) on "
+            f"{self.target_service}{decoy_note}"
+        )
 
 
 def faults_summary(specs: list["FaultSpec"]) -> str:
@@ -158,11 +259,23 @@ class PumbaInjector:
         self.stack_name = config.get("stack_name", "")
         self.node_host_map: dict = config.get("node_host_map", {}) or {}
         self.node_domain_suffix = config.get("node_domain_suffix", "")
-        self._active: dict[str, str] = {}  # chaos_id -> node_host it runs on
+        self._active: dict[str, str] = {}  # chaos_id -> node_host (pumba) or manager
+        # connections faults: chaos_id -> restore metadata
+        self._conn_meta: dict[str, dict] = {}
 
     def _pumba_bin(self, spec: FaultSpec) -> str:
         return os.path.expanduser(
             spec.pumba_bin or config.get("pumba_bin", "pumba")
+        )
+
+    def _stress_ng_bin(self) -> str:
+        return os.path.expanduser(
+            config.get("stress_ng_bin", "/users/varuncg/bin/stress-ng")
+        )
+
+    def _stress_ng_image(self) -> str:
+        return config.get(
+            "stress_ng_image", "ghcr.io/alexei-led/stress-ng:latest"
         )
 
     def _resolve_node_host(self, service: str) -> str:
@@ -284,10 +397,15 @@ class PumbaInjector:
                 f"delay --time {spec.delay_ms} --jitter {spec.jitter_ms} "
                 f"--correlation {spec.correlation} \"{target}\""
             )
-        if spec.fault_type == "cpu":
+        if spec.fault_type in _STRESS_FAULT_TYPES:
+            stressor = (
+                f"--cpu {spec.cpu_workers}"
+                if spec.fault_type == "cpu"
+                else f"--icache {spec.icache_workers}"
+            )
             return (
                 f"{bin_} --log-level info stress --duration {spec.duration} "
-                f"--stressors \"--cpu {spec.cpu_workers} "
+                f"--stressors \"{stressor} "
                 f"--timeout {self._duration_seconds(spec.duration)}s\" "
                 f"\"{target}\""
             )
@@ -310,11 +428,78 @@ class PumbaInjector:
             f"fi"
         )
 
+    def _ensure_stress_ng_command(self) -> str:
+        """Shell snippet: install host stress-ng from the Pumba stress image if missing."""
+        stress = self._stress_ng_bin()
+        image = self._stress_ng_image()
+        return (
+            f"stress_ng={stress!r}; "
+            f"if [ ! -x \"$stress_ng\" ]; then "
+            f"  mkdir -p \"$(dirname \"$stress_ng\")\"; "
+            f"  tmp=$(docker create {image!r}) || exit 1; "
+            f"  docker cp \"$tmp\":/stress-ng \"$stress_ng\" || "
+            f"{{ docker rm -f \"$tmp\" >/dev/null; exit 1; }}; "
+            f"  docker rm -f \"$tmp\" >/dev/null; "
+            f"  chmod +x \"$stress_ng\"; "
+            f"fi; "
+            f"\"$stress_ng\" --help >/dev/null 2>&1 || "
+            f"{{ echo \"[ERROR] stress-ng not runnable at $stress_ng\"; exit 1; }}; "
+        )
+
+    def _icache_burst_start_command(
+        self, spec: FaultSpec, chaos_id: str, container_id: str,
+    ) -> str:
+        """Host loop: taskset to service core, burst icache stress, then sleep."""
+        _, logfile = self._chaos_paths(chaos_id)
+        pidfile, _ = self._chaos_paths(chaos_id)
+        stress = self._stress_ng_bin()
+        sleep_sec = spec.icache_sleep_ms / 1000.0
+        loop_body = (
+            f"while true; do "
+            f"{stress} --icache {spec.icache_workers} "
+            f"--timeout {spec.icache_burst_ms}ms --quiet; "
+            f"sleep {sleep_sec}; done"
+        )
+        return (
+            f"{self._ensure_stress_ng_command()}"
+            f"cid={container_id!r}; "
+            f'pid=$(docker inspect "$cid" --format \'{{{{.State.Pid}}}}\'); '
+            f'if [ -z "$pid" ] || [ "$pid" = 0 ]; then '
+            f'echo "[ERROR] no container pid for icache_burst"; exit 1; fi; '
+            f'cpu=$(ps -o psr= -p "$pid" 2>/dev/null | tr -d " "); '
+            f'if [ -z "$cpu" ]; then cpu=0; fi; '
+            f'echo "[FAULT] icache burst loop started cpu=$cpu target_pid=$pid '
+            f'stress_ng={stress}" '
+            f"> {logfile}; "
+            f"nohup setsid bash -c {loop_body!r} >>{logfile} 2>&1 < /dev/null & "
+            f"loop_pid=$!; echo $loop_pid > {pidfile}; "
+            # Pin the whole process group to the service's core.
+            f"taskset -pc \"$cpu\" $loop_pid >/dev/null 2>&1 || "
+            f"taskset -c \"$cpu\" -p $loop_pid >/dev/null 2>&1 || true; "
+            f"sleep 0.5; "
+            f"if ! kill -0 $loop_pid 2>/dev/null; then "
+            f"echo '[ERROR] icache burst failed to start:'; cat {logfile}; exit 1; "
+            f"fi; "
+            # Fail fast if the first burst could not exec stress-ng.
+            f"sleep {max(0.2, sleep_sec)}; "
+            f"if grep -qiE 'command not found|No such file|cannot execute' "
+            f"{logfile}; then "
+            f"kill -TERM -$loop_pid 2>/dev/null || kill $loop_pid 2>/dev/null || true; "
+            f"echo '[ERROR] icache burst stress-ng failed:'; cat {logfile}; exit 1; "
+            f"fi"
+        )
+
     def _stop_command(self, chaos_id: str) -> str:
         pidfile, _ = self._chaos_paths(chaos_id)
         return (
             f"if [ -f {pidfile} ]; then "
-            f"kill $(cat {pidfile}) 2>/dev/null || true; "
+            f"pid=$(cat {pidfile}); "
+            # Kill process group (icache_burst setsid) then the pid itself.
+            f"kill -TERM -$pid 2>/dev/null || true; "
+            f"kill -TERM $pid 2>/dev/null || true; "
+            f"sleep 0.2; "
+            f"kill -KILL -$pid 2>/dev/null || true; "
+            f"kill -KILL $pid 2>/dev/null || true; "
             f"rm -f {pidfile}; fi"
         )
 
@@ -367,13 +552,17 @@ class PumbaInjector:
         return hosts
 
     def _recover_one(self, chaos_id: str, node_host: str) -> None:
+        if chaos_id in self._conn_meta or chaos_id.startswith("cpe-chaos-connections-"):
+            self._recover_connections(chaos_id)
+            return
         log = self._read_chaos_log_raw(chaos_id, node_host)
         Shell.exec_on_node(node_host, self._stop_command(chaos_id))
         for container in container_names_from_log(log):
             self._reset_container_tc(node_host, container)
         self._remove_chaos_files(chaos_id, node_host)
         self._active.pop(chaos_id, None)
-        print(f"[FAULT] Recovered pumba process {chaos_id} on {node_host}")
+        label = "icache burst" if chaos_id.startswith("cpe-chaos-icache_burst-") else "pumba"
+        print(f"[FAULT] Recovered {label} process {chaos_id} on {node_host}")
 
     def _recover_leftover_chaos_files(self, node_host: str) -> None:
         try:
@@ -409,7 +598,279 @@ class PumbaInjector:
         except ValueError:
             return 600
 
+    def _service_config_path(self) -> Path:
+        override = config.get("service_config_path")
+        if override:
+            return Path(override).expanduser().resolve()
+        app_src = config.app_source_dir()
+        if app_src is None:
+            raise FaultInjectionError(
+                "Cannot locate service-config.json: no active suite "
+                "(apply_suite_profile) and service_config_path unset"
+            )
+        path = app_src / "config" / "service-config.json"
+        if not path.is_file():
+            raise FaultInjectionError(f"service-config.json not found at {path}")
+        return path
+
+    def _service_config_binding(self, service: str) -> tuple[str, str]:
+        """Return (ConfigName, mount target) for service-config.json on *service*."""
+        name = self.swarm.qualified_name(service)
+        raw = Shell.exec(
+            f"docker service inspect {name} "
+            f"--format '{{{{json .Spec.TaskTemplate.ContainerSpec.Configs}}}}'",
+            timeout=60,
+        ).strip()
+        if raw.startswith("[ERROR]") or not raw or raw == "null":
+            raise FaultInjectionError(
+                f"Could not inspect configs for {service!r}: {raw}"
+            )
+        try:
+            configs = json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise FaultInjectionError(
+                f"Bad configs JSON for {service!r}: {e}: {raw[:200]!r}"
+            ) from e
+        for entry in configs or []:
+            file_meta = entry.get("File") or {}
+            target = file_meta.get("Name") or ""
+            cfg_name = entry.get("ConfigName") or ""
+            if cfg_name and target.endswith("service-config.json"):
+                return cfg_name, target
+        raise FaultInjectionError(
+            f"No service-config.json config binding found on {service!r}"
+        )
+
+    def _wait_service_ready(self, service: str, timeout_sec: int = 180) -> None:
+        name = self.swarm.qualified_name(service)
+        deadline = time.time() + timeout_sec
+        while time.time() < deadline:
+            replicas = Shell.exec(
+                f"docker service ls --filter name={name} "
+                f"--format '{{{{.Name}}}} {{{{.Replicas}}}}'",
+                timeout=30,
+            ).strip()
+            for line in replicas.splitlines():
+                parts = line.split()
+                if len(parts) >= 2 and parts[0] == name and parts[1] == "1/1":
+                    return
+            time.sleep(2)
+        raise FaultInjectionError(
+            f"Service {service!r} did not reach 1/1 within {timeout_sec}s"
+        )
+
+    def _force_restart_service(self, service: str) -> None:
+        """Force-update a Swarm service and wait until it is 1/1 again."""
+        name = self.swarm.qualified_name(service)
+        print(f"[FAULT] Force-restarting {service} ({name})")
+        out = Shell.exec(
+            f"docker service update --detach=false --force {name}",
+            timeout=300,
+        )
+        if out.startswith("[ERROR]"):
+            raise FaultInjectionError(
+                f"Failed to force-restart {service!r}: {out}"
+            )
+        self._wait_service_ready(service)
+
+    def _force_restart_services(self, services: list[str]) -> None:
+        seen: set[str] = set()
+        for svc in services:
+            if not svc or svc in seen:
+                continue
+            seen.add(svc)
+            self._force_restart_service(svc)
+
+    def _verify_connections_in_task(self, spec: FaultSpec) -> None:
+        node_host = self._resolve_node_host(spec.target_service)
+        cid = self._running_container_id(node_host, spec.target_service)
+        raw = Shell.exec_on_node(
+            node_host,
+            f"docker exec {cid} cat {_SERVICE_CONFIG_MOUNT}",
+            timeout=60,
+        )
+        if raw.startswith("[ERROR]"):
+            raise FaultInjectionError(
+                f"Could not read service-config inside {spec.target_service}: {raw}"
+            )
+        try:
+            cfg = json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise FaultInjectionError(
+                f"Invalid service-config in task: {e}"
+            ) from e
+        peer = spec.peer_service or ""
+        got = (cfg.get(peer) or {}).get("connections")
+        if got != spec.connections:
+            raise FaultInjectionError(
+                f"Expected {peer}.connections={spec.connections} in task, got {got!r}"
+            )
+        print(
+            f"[FAULT] Verified {peer}.connections={got} in "
+            f"{spec.target_service} task on {node_host}"
+        )
+
+    def _inject_connections(self, spec: FaultSpec) -> str:
+        """Shrink ClientPool max size via a temporary Swarm config + service update."""
+        assert spec.peer_service is not None
+        chaos_id = f"cpe-chaos-connections-{uuid.uuid4().hex[:8]}"
+        config_name = f"cpe-conn-{uuid.uuid4().hex[:8]}"
+        manager = config.get("manager_host", "localhost")
+
+        print(f"[FAULT] Injecting {spec.summary()}")
+        src_path = self._service_config_path()
+        with open(src_path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        if spec.peer_service not in cfg or not isinstance(cfg[spec.peer_service], dict):
+            raise FaultInjectionError(
+                f"Config key {spec.peer_service!r} missing in {src_path}"
+            )
+        original = cfg[spec.peer_service].get("connections")
+        cfg[spec.peer_service]["connections"] = spec.connections
+        print(
+            f"[FAULT] {spec.peer_service}.connections: "
+            f"{original} -> {spec.connections} (source {src_path})"
+        )
+
+        orig_cfg_name, mount_target = self._service_config_binding(spec.target_service)
+        print(
+            f"[FAULT] Replacing Swarm config {orig_cfg_name!r} on "
+            f"{spec.target_service} (mount {mount_target})"
+        )
+
+        tmp_path: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".json", delete=False, encoding="utf-8"
+            ) as tmp:
+                json.dump(cfg, tmp, indent=2)
+                tmp.write("\n")
+                tmp_path = tmp.name
+            create_out = Shell.exec(
+                f"docker config create {config_name} {tmp_path}",
+                timeout=60,
+            )
+            if create_out.startswith("[ERROR]"):
+                raise FaultInjectionError(
+                    f"docker config create failed: {create_out}"
+                )
+
+            svc = self.swarm.qualified_name(spec.target_service)
+            update_out = Shell.exec(
+                f"docker service update --detach=false "
+                f"--config-rm {orig_cfg_name} "
+                f"--config-add source={config_name},target={mount_target} "
+                f"{svc}",
+                timeout=300,
+            )
+            if update_out.startswith("[ERROR]"):
+                Shell.exec(f"docker config rm {config_name}", timeout=60)
+                raise FaultInjectionError(
+                    f"docker service update failed: {update_out}"
+                )
+            self._wait_service_ready(spec.target_service)
+            self._verify_connections_in_task(spec)
+            if spec.also_restart:
+                print(
+                    f"[FAULT] Restarting parent/caller services after "
+                    f"{spec.target_service} config change: {spec.also_restart}"
+                )
+                self._force_restart_services(spec.also_restart)
+        finally:
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+
+        self._active[chaos_id] = manager
+        self._conn_meta[chaos_id] = {
+            "service": spec.target_service,
+            "config_name": config_name,
+            "original_config_name": orig_cfg_name,
+            "mount_target": mount_target,
+            "peer_service": spec.peer_service,
+            "connections": spec.connections,
+            "also_restart": list(spec.also_restart),
+        }
+        print(f"[FAULT] Started connections fault (chaos={chaos_id})")
+        return chaos_id
+
+    def _recover_connections(self, chaos_id: str) -> None:
+        meta = self._conn_meta.pop(chaos_id, None)
+        self._active.pop(chaos_id, None)
+        if not meta:
+            print(f"[FAULT] No connections metadata for {chaos_id}; skip")
+            return
+        svc = self.swarm.qualified_name(meta["service"])
+        cfg_name = meta["config_name"]
+        orig = meta["original_config_name"]
+        mount = meta["mount_target"]
+        also_restart = list(meta.get("also_restart") or [])
+        print(
+            f"[FAULT] Restoring {meta['service']} config "
+            f"{cfg_name!r} -> {orig!r}"
+        )
+        # Current binding may already be the temporary config.
+        try:
+            current_name, _ = self._service_config_binding(meta["service"])
+        except FaultInjectionError:
+            current_name = cfg_name
+        update_out = Shell.exec(
+            f"docker service update --detach=false "
+            f"--config-rm {current_name} "
+            f"--config-add source={orig},target={mount} "
+            f"{svc}",
+            timeout=300,
+        )
+        if update_out.startswith("[ERROR]"):
+            print(f"[FAULT] Warning: failed to restore config: {update_out}")
+        else:
+            try:
+                self._wait_service_ready(meta["service"])
+            except FaultInjectionError as e:
+                print(f"[FAULT] Warning: {e}")
+        if also_restart:
+            try:
+                print(
+                    f"[FAULT] Restarting parent/caller services after "
+                    f"{meta['service']} config restore: {also_restart}"
+                )
+                self._force_restart_services(also_restart)
+            except FaultInjectionError as e:
+                print(f"[FAULT] Warning: parent restart failed: {e}")
+        rm_out = Shell.exec(f"docker config rm {cfg_name}", timeout=60)
+        if rm_out.startswith("[ERROR]"):
+            print(f"[FAULT] Warning: docker config rm {cfg_name}: {rm_out}")
+        print(f"[FAULT] Recovered connections fault {chaos_id}")
+
+    def _inject_icache_burst(self, spec: FaultSpec) -> str:
+        node_host = self._resolve_node_host(spec.target_service)
+        container_id = self._running_container_id(node_host, spec.target_service)
+        chaos_id = f"cpe-chaos-icache_burst-{uuid.uuid4().hex[:8]}"
+        command = self._icache_burst_start_command(spec, chaos_id, container_id)
+
+        print(f"[FAULT] Injecting {spec.summary()}")
+        print(f"[FAULT] node: {node_host}")
+        print(f"[FAULT] container: {container_id}")
+        print(f"[FAULT] remote shell: {command}")
+
+        out = Shell.exec_on_node(node_host, command)
+        if out.startswith("[ERROR]"):
+            raise FaultInjectionError(
+                f"Failed to start icache burst ({spec.summary()}) on "
+                f"{node_host}: {out}"
+            )
+        self._active[chaos_id] = node_host
+        print(f"[FAULT] Started on node {node_host} (chaos={chaos_id})")
+        return chaos_id
+
     def _inject_one(self, spec: FaultSpec) -> str:
+        if spec.fault_type == "connections":
+            return self._inject_connections(spec)
+        if spec.fault_type == "icache_burst":
+            return self._inject_icache_burst(spec)
+
         node_host = self._resolve_node_host(spec.target_service)
         chaos_id = f"cpe-chaos-{spec.fault_type}-{uuid.uuid4().hex[:8]}"
         netem_interface = (
@@ -455,14 +916,18 @@ class PumbaInjector:
     def _verify_chaos_log(self, chaos_id: str, node_host: str, spec: FaultSpec) -> None:
         log = self._read_chaos_log(chaos_id, node_host)
         if log:
-            print(f"[FAULT] pumba log ({chaos_id}):\n{log}")
-        verify_pumba_log(log, spec)
+            print(f"[FAULT] fault log ({chaos_id}):\n{log}")
+        if spec.fault_type == "icache_burst":
+            verify_icache_burst_log(log, spec)
+        else:
+            verify_pumba_log(log, spec)
 
     def inject(self, spec: FaultSpec) -> str:
         chaos_id = self._inject_one(spec)
         time.sleep(config.get("fault_settle_seconds", 5))
-        node_host = self._active[chaos_id]
-        self._verify_chaos_log(chaos_id, node_host, spec)
+        if spec.fault_type != "connections":
+            node_host = self._active[chaos_id]
+            self._verify_chaos_log(chaos_id, node_host, spec)
         return chaos_id
 
     def inject_all(self, specs: list[FaultSpec]) -> list[str]:
@@ -473,6 +938,8 @@ class PumbaInjector:
             pairs.append((spec, self._inject_one(spec)))
         time.sleep(config.get("fault_settle_seconds", 5))
         for spec, chaos_id in pairs:
+            if spec.fault_type == "connections":
+                continue
             self._verify_chaos_log(chaos_id, self._active[chaos_id], spec)
         return [chaos_id for _, chaos_id in pairs]
 

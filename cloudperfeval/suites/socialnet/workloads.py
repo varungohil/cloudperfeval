@@ -28,6 +28,14 @@ READ_USER_TIMELINE = dict(
     method="GET",
     trace_service="frontend-service",
 )
+# Mixed read-only workload: 1/2 home timeline, 1/2 user timeline (no compose).
+READ_HOME_AND_USER_TIMELINE = dict(
+    endpoint="/wrk2-api/home-timeline/read?user_id=1&start=1&stop=20",
+    wrk_url="/wrk2-api/home-timeline/read",
+    wrk_script="./scripts/social-network/read-home-and-user-timeline.lua",
+    method="GET",
+    trace_service="frontend-service",
+)
 
 
 def single(spec: dict) -> WorkloadSpec:

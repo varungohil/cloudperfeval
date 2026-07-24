@@ -47,26 +47,22 @@ run(max_steps):    agent emits one read-only API call per turn
                    -> on submit({...}) -> problem.eval(...) -> recover fault
 ```
 
-Two task types ship today:
+One task type is used for almost all problems:
 
-- **service-diagnosis-single-request** (`*-trace-*`): agent is handed one slow
-  trace ID and must name the bottleneck service.
-- **service-diagnosis-sustained-requests** (`*-open-*`): an endpoint is slow
-  under load; the agent explores traces/metrics/logs to find the bottleneck.
-- **resource-diagnosis** (`*-resource-*`): under load, the agent identifies
-  the bottleneck resource (cpu, mem, network, or disk) and localizes it to a
-  service; for network bottlenecks it also names the starting and ending
-  services on the congested path.
+- **resource-diagnosis**: under load (or for a single slow request), the agent
+  identifies the bottleneck resource (cpu, mem, network, or disk) and localizes
+  it to a service; for network bottlenecks it also names the starting and ending
+  services on the congested path. Multi-fault problems require listing every
+  contributing fault.
+
+The Seer-style backpressure problem
+(`home_timeline_to_post_storage_conn_backpressure`) still uses
+**service-diagnosis** (name the bottleneck service only), because either side of
+the constrained edge can look saturated.
 
 ## Submission + grading
 
 The agent submits:
-
-```
-submit({"root_cause_service": "compose-post-service", "reason": "..."})
-```
-
-For resource-diagnosis problems:
 
 ```
 submit({"resource": "cpu", "service": "home-timeline-service", "reason": "..."})
@@ -74,31 +70,34 @@ submit({"resource": "network", "from_service": "home-timeline-service",
         "to_service": "post-storage-service", "reason": "..."})
 ```
 
-For service-diagnosis problems, `eval()` scores two ways and passes if **either**
-agrees:
+Multi-fault problems:
 
-1. **Exact match** of `root_cause_service` vs the faulted service (name
-   normalized; `-service` suffix and aliases tolerated).
-2. **Trace oracle**: the service with the largest *exclusive* span time in the
-   reference trace (`JaegerAPI.self_time_by_service`).
+```
+submit({"faults": [
+  {"resource": "cpu", "service": "home-timeline-service", "reason": "..."},
+  {"resource": "network", "from_service": "...", "to_service": "...", "reason": "..."}
+]})
+```
 
 Resource-diagnosis grading requires an exact match on the bottleneck resource
 and service localization (for network faults, both `from_service` and
-`to_service` must match).
+`to_service` must match). Multi-fault grading is an exact set match over the
+submitted `faults` list.
 
 Results (per run) land in `results/<session_id>.json`:
 
 ```json
 {
-  "localization_exact": true,
+  "success": true,
+  "resource_exact": true,
+  "service_exact": true,
+  "predicted_resource": "cpu",
+  "expected_resource": "cpu",
   "predicted_service": "compose-post-service",
   "expected_service": "compose-post-service",
-  "trace_oracle_service": "compose-post-service",
-  "trace_oracle_match": true,
-  "success": true,
   "steps": 3,
   "duration_sec": 24.1,
-  "fault_type": "delay",
+  "fault_type": "cpu",
   "workload_p95_ms": 812.3
 }
 ```
@@ -131,18 +130,56 @@ python3 run.py --list --suite socialnet
 Drive one problem manually (type API calls yourself — no LLM needed):
 
 ```bash
-python3 run.py --problem-id socialnet:compose_post_delay-trace-1 --agent manual
+python3 run.py --problem-id socialnet:home_timeline_cpu-resource-1 --agent manual
 # legacy un-prefixed IDs still work when unique:
-python3 run.py --problem-id compose_post_delay-trace-1 --agent manual
+python3 run.py --problem-id home_timeline_cpu-resource-1 --agent manual
 ```
 
 Run with an LLM agent:
 
 ```bash
 export OPENAI_API_KEY=sk-...
-python3 run.py --problem-id socialnet:compose_post_delay-trace-1 --agent llm --model gpt-4o
-python3 run.py --problem-id socialnet:home_timeline_cpu-open-1 --agent llm --model gpt-4o --max-steps 20
+python3 run.py --problem-id socialnet:home_timeline_cpu-resource-1 --agent llm --model gpt-4o
+python3 run.py --problem-id socialnet:home_timeline_cpu-resource-1 --agent llm --model gpt-4o --max-steps 20
 ```
+
+Run with Claude Code or Codex (SREGym-style coding agents):
+
+These agents own their tool loop. They investigate via **Bash** +
+`python -m cloudperfeval.tools.call` (like SREGym’s kubectl path), write
+`submission.json`, then the harness grades. Auth must be available in the
+same shell:
+
+```bash
+# Claude Code — needs `claude` + ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN
+export ANTHROPIC_API_KEY=sk-ant-...
+python3 run.py --problem-id socialnet:home_timeline_cpu-resource-1 --agent claude-code
+python3 run.py --problem-id socialnet:home_timeline_cpu-resource-1 --agent claude-code --model sonnet
+
+# Codex — needs `codex` + OPENAI_API_KEY (or `codex login` / ~/.codex/auth.json)
+export OPENAI_API_KEY=sk-...
+python3 run.py --problem-id socialnet:home_timeline_cpu-resource-1 --agent codex
+python3 run.py --problem-id socialnet:home_timeline_cpu-resource-1 --agent codex --model gpt-5
+```
+
+Optional timeout override for coding agents: `CPE_AGENT_TIMEOUT_SEC` (default scales with `--max-steps`).
+Per-run artifacts land under `results/agent_workdirs/<problem>_<session>/`
+(`INSTRUCTION.md`, `codex.txt` / `claude-code.txt`, `submission.json`).
+
+To confine autonomous agents to a per-run writable `/scratch`, build the
+sandbox image and enable it in `config.yml`:
+
+```bash
+docker build -f docker/agent-sandbox/Dockerfile -t cpe-agent-sandbox:latest .
+# Set agent_sandbox.enabled: true in config.yml
+```
+
+The sandbox uses a read-only root filesystem and exposes no CloudPerfEval tools
+or tool descriptions. Agents query Prometheus and Jaeger directly using URLs in
+`CPE_PROMETHEUS_URL` / `CPE_JAEGER_URL`, inspect Swarm state with the Docker CLI
+through a GET-only Unix-socket proxy, read `/opt/app-source`, and write the final
+JSON diagnosis to `/scratch/submission.json`. The raw Docker socket is never
+mounted. Disable for debugging with `--no-agent-sandbox`.
 
 Run the whole suite and print accuracy:
 
@@ -150,13 +187,15 @@ Run the whole suite and print accuracy:
 python3 bench.py --agent llm --model gpt-4o
 python3 bench.py --agent llm --model gpt-4o --suite socialnet
 python3 bench.py --agent llm --model gpt-4o --filter delay
+python3 bench.py --agent claude-code
+python3 bench.py --agent codex
 ```
 
 Use a per-suite config profile:
 
 ```bash
 python3 run.py --config config/suites/socialnet.yml \
-  --problem-id socialnet:compose_post_delay-trace-1 --agent manual
+  --problem-id socialnet:home_timeline_cpu-resource-1 --agent manual
 ```
 
 ## Adding an application and suite
@@ -173,30 +212,29 @@ python3 run.py --config config/suites/socialnet.yml \
 `problems.py`. Single fault:
 
 ```python
-suite.namespaced_id("compose_post_delay-trace-1"): lambda: PerformanceProblem(
-    problem_id=suite.namespaced_id("compose_post_delay-trace-1"),
+suite.namespaced_id("home_timeline_cpu-resource-1"): lambda: PerformanceProblem(
+    problem_id=suite.namespaced_id("home_timeline_cpu-resource-1"),
     suite=suite,
-    fault=FaultSpec("delay", "compose-post-service", delay_ms=500),
-    workload=wl.single(wl.COMPOSE_POST),
-    task=ServiceDiagnosis(),
-    bottleneck_service="compose-post-service",
+    fault=FaultSpec("cpu", "home-timeline-service", cpu_workers=30),
+    workload=wl.sustained(wl.READ_HOME_TIMELINE, rate=1000, connections=100, duration=60),
+    task=ResourceDiagnosis(endpoint=wl.READ_HOME_TIMELINE["endpoint"]),
+    bottleneck_service="home-timeline-service",
 ),
 ```
 
-Multiple faults, single graded bottleneck:
+Multiple faults (exact set-match grading):
 
 ```python
-suite.namespaced_id("compose_multi_fault-trace-1"): lambda: PerformanceProblem(
-    problem_id=suite.namespaced_id("compose_multi_fault-trace-1"),
+suite.namespaced_id("home_and_user_timeline_cpu_sustainedreq"): lambda: PerformanceProblem(
+    problem_id=suite.namespaced_id("home_and_user_timeline_cpu_sustainedreq"),
     suite=suite,
     faults=[
-        FaultSpec("delay", "compose-post-service", delay_ms=800),
-        FaultSpec("delay", "post-storage-service", delay_ms=50),
-        FaultSpec("cpu", "social-graph-service", cpu_workers=2),
+        FaultSpec("cpu", "home-timeline-service", cpu_workers=30),
+        FaultSpec("cpu", "user-timeline-service", cpu_workers=30),
     ],
-    workload=wl.single(wl.COMPOSE_POST),
-    task=ServiceDiagnosis(),
-    bottleneck_service="compose-post-service",  # primary on critical path
+    workload=wl.sustained(wl.READ_HOME_AND_USER_TIMELINE, rate=1000, connections=100, duration=60),
+    task=ResourceDiagnosis(endpoint=wl.READ_HOME_TIMELINE["endpoint"]),
+    bottleneck_service="home-timeline-service",
 ),
 ```
 

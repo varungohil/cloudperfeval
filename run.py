@@ -17,9 +17,25 @@ from cloudperfeval.workload import TraceCaptureError
 def parse_args():
     p = argparse.ArgumentParser(description="Run a cloud performance-debugging task")
     p.add_argument("--problem-id", type=str, help="Problem ID from the registry")
-    p.add_argument("--agent", type=str, default="manual", choices=AGENT_CHOICES)
-    p.add_argument("--model", type=str, default=None, help="Model for the LLM agent")
-    p.add_argument("--max-steps", type=int, default=15)
+    p.add_argument(
+        "--agent",
+        type=str,
+        default="manual",
+        choices=AGENT_CHOICES,
+        help="Agent backend: manual, llm, codex, or claude-code",
+    )
+    p.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="Model override for llm / codex / claude-code agents",
+    )
+    p.add_argument(
+        "--max-steps",
+        type=int,
+        default=15,
+        help="Turn budget for llm/manual; also scales timeout for codex/claude-code",
+    )
     p.add_argument("--config", type=str, default=None, help="Path to config YAML")
     p.add_argument(
         "--suite", "--benchmark", "--app", dest="suite", type=str, default=None,
@@ -48,7 +64,20 @@ def parse_args():
             "run: resume a snapshot by --snapshot-id, Jaeger wait, agent loop."
         ),
     )
+    p.add_argument(
+        "--no-agent-sandbox",
+        action="store_true",
+        help="Disable the Docker filesystem jail for codex/claude-code (debug escape hatch)",
+    )
     return p.parse_args()
+
+
+def _apply_sandbox_cli(args) -> None:
+    if not args.no_agent_sandbox:
+        return
+    sandbox = dict(config.get("agent_sandbox", {}) or {})
+    sandbox["enabled"] = False
+    config.set("agent_sandbox", sandbox)
 
 
 async def main():
@@ -57,6 +86,7 @@ async def main():
         config.reload(args.config)
     if args.stack_name:
         config.set("stack_name", args.stack_name)
+    _apply_sandbox_cli(args)
 
     registry = ProblemRegistry()
 

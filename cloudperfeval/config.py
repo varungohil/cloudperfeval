@@ -68,11 +68,21 @@ class Config:
         return self._data[key]
 
     def apply_suite_profile(self, suite_id: str) -> None:
-        """Reset overridable keys to defaults, then apply the suite profile."""
+        """Apply suite deployment overrides without wiping runtime config.
+
+        Only keys in ``SUITE_OVERRIDE_KEYS`` are reset from defaults / the suite
+        profile. Runtime overrides (e.g. ``results_dir`` from ``--outdir``,
+        ``agent_sandbox`` from ``--no-agent-sandbox``) are preserved.
+        """
         if self._active_suite == suite_id:
             return
 
-        self._data = copy.deepcopy(self._defaults)
+        for key in SUITE_OVERRIDE_KEYS:
+            if key in self._defaults:
+                self._data[key] = copy.deepcopy(self._defaults[key])
+            else:
+                self._data.pop(key, None)
+
         profile = self._suite_profiles().get(suite_id) or {}
         for key in SUITE_OVERRIDE_KEYS:
             if key in profile:

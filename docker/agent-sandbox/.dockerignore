@@ -1,0 +1,21 @@
+# Keep the sandbox image free of ground truth, run artifacts, and bulk app trees.
+results/
+docs/
+tests/
+apps/
+.git/
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache/
+cloudperfeval/suites/
+cloudperfeval/problems/
+cloudperfeval/tasks/
+cloudperfeval/evaluators/
+cloudperfeval/fault/
+cloudperfeval/agents/
+cloudperfeval/workload/
+config.yml
+config/
+*.md
+bench.py
+run.py
