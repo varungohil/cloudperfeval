@@ -155,6 +155,10 @@ def build_docker_command(
         "--mount",
         _mount(paths.gateway_dir, "/run/cpe", readonly=True),
     ]
+    # Let the container reach host-side proxies (Jaeger fault proxy) while still
+    # using bridge networking for remote Prometheus/Jaeger/model APIs.
+    if settings.network not in {"none", ""}:
+        cmd.extend(["--add-host=host.docker.internal:host-gateway"])
     source_dir = config.app_source_dir()
     if source_dir is not None and source_dir.is_dir():
         cmd.extend(["--mount", _mount(source_dir.resolve(), "/opt/app-source", readonly=True)])

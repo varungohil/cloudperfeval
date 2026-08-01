@@ -142,8 +142,8 @@ async def main():
     rows = []
     for i, pid in enumerate(problem_ids):
         if i > 0:
-            print("\n[BENCH] Waiting 60s before next problem...")
-            time.sleep(60)
+            print("\n[BENCH] Waiting 30s before next problem...")
+            time.sleep(30)
         print("\n" + "#" * 70)
         print(f"# {pid}")
         print("#" * 70)

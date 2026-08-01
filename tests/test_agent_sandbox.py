@@ -117,6 +117,34 @@ class DockerCommandTests(unittest.TestCase):
                 command,
             )
             self.assertNotEqual(env.get("DOCKER_HOST"), "unix:///run/cpe/docker.sock")
+            self.assertNotIn("host.docker.internal:host-gateway", rendered)
+
+    def test_bridge_network_maps_host_docker_internal(self) -> None:
+        previous = config.get("agent_sandbox")
+        config.set(
+            "agent_sandbox",
+            {
+                "enabled": True,
+                "runtime": "docker",
+                "image": "test-sandbox:latest",
+                "cpus": 1,
+                "memory_limit": "512m",
+                "pids_limit": 64,
+                "network": "bridge",
+            },
+        )
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                paths = prepare_sandbox_paths(Path(tmp))
+                command, _env = build_docker_command(
+                    ["true"],
+                    agent_kind="claude",
+                    paths=paths,
+                    env={},
+                )
+                self.assertIn("--add-host=host.docker.internal:host-gateway", command)
+        finally:
+            config.set("agent_sandbox", previous)
 
     def test_disabled_action_is_hidden_from_cli_listing(self) -> None:
         with patch.dict(os.environ, {"CPE_DISABLED_ACTIONS": "exec_shell"}, clear=False):
@@ -146,6 +174,8 @@ class DockerCommandTests(unittest.TestCase):
         self.assertIn("DIRECT INVESTIGATION", prompt)
         self.assertIn("$CPE_PROMETHEUS_URL", prompt)
         self.assertIn("/scratch/submission.json", prompt)
+        self.assertIn("1-2 line `solution`", prompt)
+        self.assertIn('"solution":"..."', prompt)
         self.assertNotIn("sentinel_tool", prompt)
         self.assertNotIn("SENTINEL TOOL DESCRIPTION", prompt)
         self.assertNotIn("SENTINEL ORIGINAL TOOL INSTRUCTIONS", prompt)

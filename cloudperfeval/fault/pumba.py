@@ -15,6 +15,12 @@ Network delay supports optional scoping:
     (pumba netem `--target <peer-ip>`; CIDR suffixes from Swarm are stripped).
   - `egress_port` / `ingress_port`: limit delay to matching source/dest ports.
 
+Multiple peer-scoped delays on the **same** ``target_service`` (same delay /
+jitter / ports / duration) are coalesced into one Pumba netem process with
+repeated ``--target`` flags. Two separate Pumba netem runs cannot share a NIC
+(Linux allows only one root ``tc`` qdisc), so coalescing is required for
+multi-path delays from one service.
+
 ``cpu`` and ``icache`` run a stress-ng sidecar under the target container's
 cgroup via ``pumba stress`` (``--cpu`` / ``--icache`` stressors). This competes
 for the target's CPU quota; microarchitectural interference (including L1i
@@ -29,7 +35,7 @@ for netem faults). ``icache_burst`` requires ``stress-ng`` on worker nodes.
 The harness does not run Pumba inside Docker.
 
 Pumba reference:
-  net delay : pumba netem [--target IP] [--egress-port P] [--ingress-port P]
+  net delay : pumba netem [--target IP ...] [--egress-port P] [--ingress-port P]
               --duration D delay --time MS <source-containers>
   stress    : pumba stress --duration D --stressors "..." <target>
 """
@@ -251,6 +257,46 @@ def faults_summary(specs: list["FaultSpec"]) -> str:
     return f"{len(specs)} faults: " + "; ".join(s.summary() for s in specs)
 
 
+def delay_coalesce_key(spec: FaultSpec) -> tuple | None:
+    """Return a merge key for peer-scoped delays that can share one Pumba netem.
+
+    Specs with the same key are safe to coalesce (identical delay params and
+    port filters on the same source service). Returns None when the spec must
+    remain a singleton injection.
+    """
+    if spec.fault_type != "delay" or not spec.peer_service:
+        return None
+    return (
+        spec.target_service,
+        spec.delay_ms,
+        spec.jitter_ms,
+        spec.correlation,
+        spec.duration,
+        spec.egress_port,
+        spec.ingress_port,
+        spec.pumba_bin,
+    )
+
+
+def group_specs_for_inject(specs: list[FaultSpec]) -> list[list[FaultSpec]]:
+    """Group coalescable same-service delays; leave other specs as singletons.
+
+    Preserves first-seen order of each group. Later delays that match an earlier
+    coalesce key join that group (even if other fault types appear in between).
+    """
+    groups: list[list[FaultSpec]] = []
+    key_to_idx: dict[tuple, int] = {}
+    for spec in specs:
+        key = delay_coalesce_key(spec)
+        if key is not None and key in key_to_idx:
+            groups[key_to_idx[key]].append(spec)
+            continue
+        groups.append([spec])
+        if key is not None:
+            key_to_idx[key] = len(groups) - 1
+    return groups
+
+
 class PumbaInjector:
     """Inject and recover Pumba faults via the host-installed pumba binary."""
 
@@ -315,11 +361,30 @@ class PumbaInjector:
             )
         return [self._peer_target_ip(addr) for addr in endpoints]
 
-    def _netem_scope_flags(self, spec: FaultSpec) -> str:
-        """Optional pumba netem filters: --target, --egress-port, --ingress-port."""
-        flags = ""
+    def _peer_services_for_scope(
+        self, spec: FaultSpec, peer_services: list[str] | None = None,
+    ) -> list[str]:
+        if peer_services is not None:
+            return list(peer_services)
         if spec.peer_service:
-            for cidr in self._resolve_peer_targets(spec.peer_service):
+            return [spec.peer_service]
+        return []
+
+    def _netem_scope_flags(
+        self, spec: FaultSpec, peer_services: list[str] | None = None,
+    ) -> str:
+        """Optional pumba netem filters: --target, --egress-port, --ingress-port.
+
+        When *peer_services* lists multiple peers (coalesced same-service delays),
+        each peer's IP(s) become a repeated ``--target`` on one netem command.
+        """
+        flags = ""
+        seen_ips: set[str] = set()
+        for peer in self._peer_services_for_scope(spec, peer_services):
+            for cidr in self._resolve_peer_targets(peer):
+                if cidr in seen_ips:
+                    continue
+                seen_ips.add(cidr)
                 flags += f" --target {cidr}"
         if spec.egress_port is not None:
             flags += f" --egress-port {spec.egress_port}"
@@ -363,15 +428,23 @@ class PumbaInjector:
             )
         return iface
 
-    def _resolve_netem_interface(self, spec: FaultSpec, node_host: str) -> str:
+    def _resolve_netem_interface(
+        self,
+        spec: FaultSpec,
+        node_host: str,
+        peer_services: list[str] | None = None,
+    ) -> str:
         """Pick the container interface Pumba should attach netem to."""
         if spec.fault_type != "delay":
             return config.get("pumba_default_interface", "eth0")
 
-        if not spec.peer_service:
+        peers = self._peer_services_for_scope(spec, peer_services)
+        if not peers:
             return config.get("pumba_default_interface", "eth0")
 
-        peer_ips = self._resolve_peer_targets(spec.peer_service)
+        peer_ips: list[str] = []
+        for peer in peers:
+            peer_ips.extend(self._resolve_peer_targets(peer))
         container_id = self._running_container_id(node_host, spec.target_service)
         iface = self._detect_egress_interface(node_host, container_id, peer_ips[0])
         for peer_ip in peer_ips[1:]:
@@ -385,7 +458,12 @@ class PumbaInjector:
                 )
         return iface
 
-    def _pumba_args(self, spec: FaultSpec, netem_interface: str = "eth0") -> str:
+    def _pumba_args(
+        self,
+        spec: FaultSpec,
+        netem_interface: str = "eth0",
+        peer_services: list[str] | None = None,
+    ) -> str:
         """Pumba subcommand + flags (without nohup/background wrapper)."""
         target = self._target_regex(spec.target_service)
         bin_ = self._pumba_bin(spec)
@@ -393,7 +471,7 @@ class PumbaInjector:
             return (
                 f"{bin_} --log-level info netem --duration {spec.duration}"
                 f" --interface {netem_interface}"
-                f"{self._netem_scope_flags(spec)} "
+                f"{self._netem_scope_flags(spec, peer_services)} "
                 f"delay --time {spec.delay_ms} --jitter {spec.jitter_ms} "
                 f"--correlation {spec.correlation} \"{target}\""
             )
@@ -416,11 +494,16 @@ class PumbaInjector:
         return f"/tmp/{chaos_id}.pid", f"/tmp/{chaos_id}.log"
 
     def _start_command(
-        self, spec: FaultSpec, chaos_id: str, netem_interface: str = "eth0",
+        self,
+        spec: FaultSpec,
+        chaos_id: str,
+        netem_interface: str = "eth0",
+        peer_services: list[str] | None = None,
     ) -> str:
         pidfile, logfile = self._chaos_paths(chaos_id)
         return (
-            f"nohup {self._pumba_args(spec, netem_interface)} >{logfile} 2>&1 & "
+            f"nohup {self._pumba_args(spec, netem_interface, peer_services)}"
+            f" >{logfile} 2>&1 & "
             f"pid=$!; echo $pid > {pidfile}; "
             f"sleep 0.5; "
             f"if ! kill -0 $pid 2>/dev/null; then "
@@ -865,7 +948,27 @@ class PumbaInjector:
         print(f"[FAULT] Started on node {node_host} (chaos={chaos_id})")
         return chaos_id
 
-    def _inject_one(self, spec: FaultSpec) -> str:
+    def _delay_inject_summary(
+        self, spec: FaultSpec, peer_services: list[str] | None = None,
+    ) -> str:
+        peers = self._peer_services_for_scope(spec, peer_services)
+        if len(peers) <= 1:
+            return spec.summary()
+        ports = []
+        if spec.egress_port is not None:
+            ports.append(f"egress-port={spec.egress_port}")
+        if spec.ingress_port is not None:
+            ports.append(f"ingress-port={spec.ingress_port}")
+        port_note = f" ({', '.join(ports)})" if ports else ""
+        peer_note = ", ".join(peers)
+        return (
+            f"network delay {spec.delay_ms}ms (jitter {spec.jitter_ms}ms) "
+            f"on {spec.target_service} -> [{peer_note}]{port_note}"
+        )
+
+    def _inject_one(
+        self, spec: FaultSpec, peer_services: list[str] | None = None,
+    ) -> str:
         if spec.fault_type == "connections":
             return self._inject_connections(spec)
         if spec.fault_type == "icache_burst":
@@ -874,14 +977,21 @@ class PumbaInjector:
         node_host = self._resolve_node_host(spec.target_service)
         chaos_id = f"cpe-chaos-{spec.fault_type}-{uuid.uuid4().hex[:8]}"
         netem_interface = (
-            self._resolve_netem_interface(spec, node_host)
+            self._resolve_netem_interface(spec, node_host, peer_services)
             if spec.fault_type == "delay"
             else "eth0"
         )
-        pumba_cmd = self._pumba_args(spec, netem_interface)
-        command = self._start_command(spec, chaos_id, netem_interface)
+        pumba_cmd = self._pumba_args(spec, netem_interface, peer_services)
+        command = self._start_command(
+            spec, chaos_id, netem_interface, peer_services,
+        )
+        summary = (
+            self._delay_inject_summary(spec, peer_services)
+            if spec.fault_type == "delay"
+            else spec.summary()
+        )
 
-        print(f"[FAULT] Injecting {spec.summary()}")
+        print(f"[FAULT] Injecting {summary}")
         print(f"[FAULT] node: {node_host}")
         if spec.fault_type == "delay":
             print(f"[FAULT] netem interface: {netem_interface} (auto-detected)")
@@ -891,7 +1001,7 @@ class PumbaInjector:
         out = Shell.exec_on_node(node_host, command)
         if out.startswith("[ERROR]"):
             raise FaultInjectionError(
-                f"Failed to start Pumba ({spec.summary()}) on {node_host}: {out}"
+                f"Failed to start Pumba ({summary}) on {node_host}: {out}"
             )
         self._active[chaos_id] = node_host
         print(f"[FAULT] Started on node {node_host} (chaos={chaos_id})")
@@ -930,12 +1040,48 @@ class PumbaInjector:
             self._verify_chaos_log(chaos_id, node_host, spec)
         return chaos_id
 
+    @staticmethod
+    def _check_compatible_delay_groups(groups: list[list[FaultSpec]]) -> None:
+        """Reject multiple non-coalesced delay injections on one service.
+
+        Separate Pumba netem processes both try to install a root tc qdisc on the
+        same NIC and the second fails. Compatible peer-scoped delays should have
+        been merged by ``group_specs_for_inject``.
+        """
+        delay_targets: list[str] = []
+        for group in groups:
+            if group[0].fault_type == "delay":
+                delay_targets.append(group[0].target_service)
+        dupes = sorted({t for t in delay_targets if delay_targets.count(t) > 1})
+        if not dupes:
+            return
+        raise FaultInjectionError(
+            "Multiple incompatible delay injections on the same service "
+            f"({', '.join(dupes)}); peer-scoped delays on one service must "
+            "share delay_ms/jitter/ports/duration so they can be coalesced "
+            "into one Pumba netem with multiple --target flags"
+        )
+
     def inject_all(self, specs: list[FaultSpec]) -> list[str]:
         if not specs:
             return []
+        groups = group_specs_for_inject(specs)
+        self._check_compatible_delay_groups(groups)
         pairs: list[tuple[FaultSpec, str]] = []
-        for spec in specs:
-            pairs.append((spec, self._inject_one(spec)))
+        for group in groups:
+            if (
+                len(group) > 1
+                and all(s.fault_type == "delay" for s in group)
+            ):
+                peers = [s.peer_service for s in group if s.peer_service]
+                print(
+                    f"[FAULT] Coalescing {len(group)} delays on "
+                    f"{group[0].target_service} -> {peers}"
+                )
+                chaos_id = self._inject_one(group[0], peer_services=peers)
+            else:
+                chaos_id = self._inject_one(group[0])
+            pairs.append((group[0], chaos_id))
         time.sleep(config.get("fault_settle_seconds", 5))
         for spec, chaos_id in pairs:
             if spec.fault_type == "connections":

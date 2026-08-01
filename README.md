@@ -65,17 +65,21 @@ the constrained edge can look saturated.
 The agent submits:
 
 ```
-submit({"resource": "cpu", "service": "home-timeline-service", "reason": "..."})
+submit({"resource": "cpu", "service": "home-timeline-service", "reason": "...",
+        "solution": "<1-2 line description of how to fix the issue>"})
 submit({"resource": "network", "from_service": "home-timeline-service",
-        "to_service": "post-storage-service", "reason": "..."})
+        "to_service": "post-storage-service", "reason": "...",
+        "solution": "<1-2 line description of how to fix the issue>"})
 ```
 
 Multi-fault problems:
 
 ```
 submit({"faults": [
-  {"resource": "cpu", "service": "home-timeline-service", "reason": "..."},
-  {"resource": "network", "from_service": "...", "to_service": "...", "reason": "..."}
+  {"resource": "cpu", "service": "home-timeline-service", "reason": "...",
+   "solution": "<1-2 line description of how to fix the issue>"},
+  {"resource": "network", "from_service": "...", "to_service": "...", "reason": "...",
+   "solution": "<1-2 line description of how to fix the issue>"}
 ]})
 ```
 
@@ -236,6 +240,28 @@ suite.namespaced_id("home_and_user_timeline_cpu_sustainedreq"): lambda: Performa
     task=ResourceDiagnosis(endpoint=wl.READ_HOME_TIMELINE["endpoint"]),
     bottleneck_service="home-timeline-service",
 ),
+```
+
+Optional incomplete-telemetry fault for sandboxed agents (omit for no drops):
+
+```python
+from cloudperfeval.agents.jaeger_proxy import JaegerProxySpec
+
+PerformanceProblem(
+    ...,
+    jaeger_proxy=JaegerProxySpec(
+        # per-service drop rates
+        services={"home-timeline-service": 0.5, "post-storage-service": 0.1},
+        operations=["RedisGet"],   # always dropped
+        seed=42,
+    ),
+)
+```
+
+Passing `services` as a list instead applies the shared `drop_prob` to each:
+
+```python
+JaegerProxySpec(drop_prob=0.3, services=["home-timeline-service"])
 ```
 
 ## Notes / things to adapt to your cluster

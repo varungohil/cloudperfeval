@@ -24,7 +24,7 @@ The sandbox prompt contains no CPE action list or action descriptions.
 | `/tmp` | Private writable tmpfs; discarded on exit |
 | `/opt/app-source` | Read-only application source |
 | Prometheus | Direct URL in `CPE_PROMETHEUS_URL` |
-| Jaeger | Direct URL in `CPE_JAEGER_URL` |
+| Jaeger | Direct URL in `CPE_JAEGER_URL`, or host span-drop proxy when the problem sets `jaeger_proxy` |
 | Docker Swarm | Docker CLI through a GET/HEAD-only API proxy |
 | CloudPerfEval tools | Unavailable |
 | Raw Docker socket | Unavailable |
@@ -47,16 +47,18 @@ Host orchestrator
 ├── injects fault, runs workload, and grades result
 ├── starts per-run GET-only Docker API proxy
 │    └── forwards allowed reads to /var/run/docker.sock
+├── optional: starts Jaeger span-drop proxy when problem.jaeger_proxy is set
+│    └── mutates /api/traces responses; oracle still uses config jaeger_url
 └── starts sandbox container
      ├── codex exec / claude
      ├── /scratch                    RW
      ├── /opt/app-source             RO
      ├── /run/cpe/docker.sock        RO proxy socket
+     ├── host.docker.internal        → host gateway (for Jaeger proxy)
      ├── CPE_PROMETHEUS_URL
-     ├── CPE_JAEGER_URL
+     ├── CPE_JAEGER_URL              (direct or Jaeger proxy URL)
      └── CPE_STACK_NAME
 ```
-
 The proxy is not the host Docker socket. It parses every HTTP request and only
 allows `GET` and `HEAD` for these state endpoints:
 
@@ -132,7 +134,34 @@ agent_sandbox:
   memory_limit: 4g
   pids_limit: 512
   network: bridge
+  jaeger_proxy:
+    timeout: 60
 ```
+
+Span-drop parameters are set on the problem, not in global config:
+
+```python
+from cloudperfeval.agents.jaeger_proxy import JaegerProxySpec
+
+PerformanceProblem(
+    ...,
+    jaeger_proxy=JaegerProxySpec(
+        services={"home-timeline-service": 0.5, "post-storage-service": 0.1},
+        operations=["RedisGet"],
+        seed=42,
+    ),
+)
+```
+
+`services` accepts a mapping of service name to drop rate, or a list of names
+that all use the shared `drop_prob`.
+
+When `jaeger_proxy` is omitted (the default), sandboxed agents receive the
+real `jaeger_url` and nothing is dropped. When set, they receive
+`CPE_JAEGER_URL=http://host.docker.internal:<port>` pointing at a host-side
+proxy: matching `operations` are always dropped, and each service in `services`
+is dropped at its own rate. Host-side oracle/trace capture continues to use
+`jaeger_url` and is unaffected.
 
 Tool-less mode currently requires `manager_host: localhost`, because the
 read-only proxy forwards to the local manager's Docker socket.

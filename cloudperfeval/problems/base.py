@@ -12,14 +12,18 @@ agent to report every *graded* fault; grading is an exact set match.
 
 Faults marked ``decoy=True`` are still injected (red herrings) but are omitted
 from ground truth — the agent must not report them.
+
+Optional ``jaeger_proxy=JaegerProxySpec(...)`` drops spans for sandboxed agents
+only. Omit it (default) for no drops.
 """
 
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from cloudperfeval.config import config
+from cloudperfeval.agents.jaeger_proxy import JaegerProxySpec
 from cloudperfeval.evaluators.bottleneck import GroundTruth
 from cloudperfeval.fault.pumba import FaultSpec, PumbaInjector, faults_summary
 from cloudperfeval.observer.traces import JaegerAPI
@@ -85,6 +89,7 @@ class PerformanceProblem:
         network_to_aliases: list[str] | None = None,
         suite: SuiteSpec | None = None,
         disclose_url: str | None = None,
+        jaeger_proxy: JaegerProxySpec | dict[str, Any] | None = None,
     ):
         if faults is not None:
             # Empty list is allowed (e.g. deploy-time misconfig already in place).
@@ -106,6 +111,8 @@ class PerformanceProblem:
         self.network_to_aliases = network_to_aliases or []
         self.suite = suite
         self.disclose_url = disclose_url
+        # None => sandboxed agents talk to Jaeger directly (no span drops).
+        self.jaeger_proxy = JaegerProxySpec.from_value(jaeger_proxy)
 
         self.injector = PumbaInjector()
         self.loadgen = WorkloadGenerator()

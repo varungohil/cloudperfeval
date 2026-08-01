@@ -81,3 +81,9 @@ agent_sandbox:
   network: bridge
   claude_bin: claude
   codex_bin: codex
+  # Optional Jaeger span-drop proxy used only when a problem sets
+  # jaeger_proxy=JaegerProxySpec(...). Timeout is the only global knob;
+  # drop_prob / services / operations come from the problem definition.
+  # Problems without jaeger_proxy hit Jaeger directly (no drops).
+  jaeger_proxy:
+    timeout: 60

@@ -16,6 +16,10 @@ from pathlib import Path
 
 from cloudperfeval.actions import SwarmActions, get_actions_doc
 from cloudperfeval.agents.docker_proxy import DockerReadOnlyProxy
+from cloudperfeval.agents.jaeger_proxy import (
+    JaegerFaultProxy,
+    jaeger_proxy_timeout_from_config,
+)
 from cloudperfeval.agents.sandbox import prepare_sandbox_paths, sandbox_enabled
 from cloudperfeval.config import config
 from cloudperfeval.parser import ResponseParser
@@ -221,6 +225,7 @@ class Orchestrator:
         submission_file = (workdir / "submission.json").resolve()
         tool_env = tool_env_for_session(submission_file=submission_file)
         docker_proxy: DockerReadOnlyProxy | None = None
+        jaeger_proxy: JaegerFaultProxy | None = None
         if sandbox_enabled():
             sandbox_paths = prepare_sandbox_paths(workdir)
             manager_host = config.get("manager_host", "localhost")
@@ -230,15 +235,35 @@ class Orchestrator:
                     "for the read-only Docker API proxy"
                 )
             docker_proxy = DockerReadOnlyProxy(sandbox_paths.gateway_dir).start()
+            jaeger_url = str(config.get("jaeger_url", ""))
+            # Drop params come from the problem. No jaeger_proxy => direct URL, no drops.
+            proxy_spec = getattr(self.problem, "jaeger_proxy", None)
+            if proxy_spec is not None:
+                jaeger_proxy = JaegerFaultProxy(
+                    jaeger_url,
+                    drop_prob=proxy_spec.drop_prob,
+                    services=proxy_spec.service_rates or None,
+                    operations=proxy_spec.operations or None,
+                    seed=proxy_spec.seed,
+                    timeout=jaeger_proxy_timeout_from_config(),
+                ).start()
+                jaeger_url = jaeger_proxy.container_url()
             tool_env = {
                 "CPE_PROMETHEUS_URL": str(config.get("prometheus_url", "")),
-                "CPE_JAEGER_URL": str(config.get("jaeger_url", "")),
+                "CPE_JAEGER_URL": jaeger_url,
                 "CPE_STACK_NAME": str(config.get("stack_name", "")),
             }
 
         print(f"[ENV] Autonomous agent workdir: {workdir}")
         if docker_proxy is not None:
             print("[ENV] Agent filesystem sandbox: tool-less direct investigation")
+        if jaeger_proxy is not None:
+            print(
+                "[ENV] Jaeger span-drop proxy: "
+                f"ops={sorted(jaeger_proxy.operations or [])} "
+                f"service_rates={dict(sorted(jaeger_proxy.service_rates.items()))} "
+                f"url={tool_env.get('CPE_JAEGER_URL')}"
+            )
 
         env_response: str = ""
         results: dict = {}
@@ -282,6 +307,17 @@ class Orchestrator:
             if outcome.timed_out:
                 results["timed_out"] = True
         finally:
+            if jaeger_proxy is not None:
+                results["jaeger_proxy"] = {
+                    "enabled": True,
+                    "drop_prob": jaeger_proxy.drop_prob,
+                    "service_rates": dict(sorted(jaeger_proxy.service_rates.items())),
+                    "operations": sorted(jaeger_proxy.operations or []),
+                    "seed": jaeger_proxy.seed,
+                    "listen_port": jaeger_proxy.listen_port,
+                    "agent_url": tool_env.get("CPE_JAEGER_URL"),
+                }
+                jaeger_proxy.stop()
             if docker_proxy is not None:
                 docker_proxy.stop()
             self.session.end()

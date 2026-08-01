@@ -34,7 +34,8 @@ RESOURCE_SUBMIT_SCHEMA = textwrap.dedent("""\
     submit({
       "resource": "cpu|mem|disk",
       "service": "<service-name>",
-      "reason": "<short evidence-based explanation>"
+      "reason": "<short evidence-based explanation>",
+      "solution": "<1-2 line description of how to fix the performance issue>"
     })
 
     For network bottlenecks (congestion between two services):
@@ -42,7 +43,8 @@ RESOURCE_SUBMIT_SCHEMA = textwrap.dedent("""\
       "resource": "network",
       "from_service": "<starting-service>",
       "to_service": "<ending-service>",
-      "reason": "<short evidence-based explanation>"
+      "reason": "<short evidence-based explanation>",
+      "solution": "<1-2 line description of how to fix the performance issue>"
     })""")
 
 

@@ -210,16 +210,18 @@ def build_instruction(
 
             Write the final diagnosis as JSON to /scratch/submission.json, then exit.
             Do this exactly once when confident.
+            Every submission must include a 1-2 line `solution` describing how to
+            fix the identified performance issue.
 
             Service-diagnosis example:
-              {{"root_cause_service":"compose-post-service","reason":"..."}}
+              {{"root_cause_service":"compose-post-service","reason":"...","solution":"..."}}
 
             Resource-diagnosis examples:
-              {{"resource":"cpu","service":"home-timeline-service","reason":"..."}}
-              {{"resource":"network","from_service":"frontend-service","to_service":"home-timeline-service","reason":"..."}}
+              {{"resource":"cpu","service":"home-timeline-service","reason":"...","solution":"..."}}
+              {{"resource":"network","from_service":"frontend-service","to_service":"home-timeline-service","reason":"...","solution":"..."}}
 
             Multi-fault example (report every injected fault):
-              {{"faults":[{{"resource":"cpu","service":"home-timeline-service","reason":"..."}},{{"resource":"network","from_service":"frontend-service","to_service":"home-timeline-service","reason":"..."}}]}}
+              {{"faults":[{{"resource":"cpu","service":"home-timeline-service","reason":"...","solution":"..."}},{{"resource":"network","from_service":"frontend-service","to_service":"home-timeline-service","reason":"...","solution":"..."}}]}}
             """
         ).strip() + "\n"
 
@@ -282,7 +284,7 @@ def build_instruction(
           {py_cli} get_trace_by_id --arg trace_id=<id>
           {py_cli} get_metrics_range --arg query='...' --arg start=<epoch> --arg end=<epoch>
           {py_cli} get_logs --arg service=frontend-service
-          {py_cli} submit --json '{{"root_cause_service":"...","reason":"..."}}'
+          {py_cli} submit --json '{{"root_cause_service":"...","reason":"...","solution":"..."}}'
 
         Keyword args: `--arg KEY=VALUE` (repeatable) or `--json '{{...}}'`.
         Values are JSON-decoded when possible.
@@ -295,16 +297,18 @@ def build_instruction(
         -------------------------------------------------------------------------
 
         When confident, submit EXACTLY ONCE, then exit. Do not keep probing.
+        Every submission must include a 1-2 line `solution` describing how to
+        fix the identified performance issue.
 
         Service-diagnosis example:
-          {py_cli} submit --json '{{"root_cause_service":"compose-post-service","reason":"..."}}'
+          {py_cli} submit --json '{{"root_cause_service":"compose-post-service","reason":"...","solution":"..."}}'
 
         Resource-diagnosis examples:
-          {py_cli} submit --json '{{"resource":"cpu","service":"home-timeline-service","reason":"..."}}'
-          {py_cli} submit --json '{{"resource":"network","from_service":"frontend-service","to_service":"home-timeline-service","reason":"..."}}'
+          {py_cli} submit --json '{{"resource":"cpu","service":"home-timeline-service","reason":"...","solution":"..."}}'
+          {py_cli} submit --json '{{"resource":"network","from_service":"frontend-service","to_service":"home-timeline-service","reason":"...","solution":"..."}}'
 
         Multi-fault (report every injected fault):
-          {py_cli} submit --json '{{"faults":[{{"resource":"cpu","service":"home-timeline-service","reason":"..."}},{{"resource":"network","from_service":"frontend-service","to_service":"home-timeline-service","reason":"..."}}]}}'
+          {py_cli} submit --json '{{"faults":[{{"resource":"cpu","service":"home-timeline-service","reason":"...","solution":"..."}},{{"resource":"network","from_service":"frontend-service","to_service":"home-timeline-service","reason":"...","solution":"..."}}]}}'
 
         After a successful submit, stop. The harness grades your submission.
         """

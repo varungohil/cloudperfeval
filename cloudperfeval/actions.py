@@ -357,11 +357,14 @@ class SwarmActions:
 
         Args:
             solution: A dict, e.g.
-                {"resource": "cpu", "service": "compose-post-service", "reason": "..."}
-                / {"resource": "network", "from_service": "...", "to_service": "...", "reason": "..."}
+                {"resource": "cpu", "service": "compose-post-service",
+                 "reason": "...", "solution": "<1-2 line remediation>"}
+                / {"resource": "network", "from_service": "...",
+                   "to_service": "...", "reason": "...",
+                   "solution": "<1-2 line remediation>"}
                 for resource-diagnosis tasks.
                 Multi-fault problems: {"faults": [{...}, {...}]} listing every
-                injected fault (resource + location).
+                injected fault (resource + location), with a solution for each.
         """
         return SubmissionStatus.VALID_SUBMISSION
 
