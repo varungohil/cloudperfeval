@@ -48,16 +48,6 @@ pid("home_timeline_cpu-resource"): lambda: PerformanceProblem(
             ),
             bottleneck_service="home-timeline-service",
         ),
-pid("post_storage_cpu-resource"): lambda: PerformanceProblem(
-            problem_id=pid("post_storage_cpu-resource-1"),
-            suite=suite,
-            fault=FaultSpec("cpu", "post-storage-service", cpu_workers=22),
-            workload=wl.sustained(wl.READ_HOME_TIMELINE, rate=1000, connections=500, duration=60, threads=100),
-            task=ResourceDiagnosis(
-                endpoint=wl.READ_HOME_TIMELINE["endpoint"], baseline_p95_ms=11
-            ),
-            bottleneck_service="post-storage-service",
-        ),
 pid("frontend_cpu-resource"): lambda: PerformanceProblem(
             problem_id=pid("frontend_cpu-resource-1"),
             suite=suite,
@@ -582,50 +572,6 @@ pid("user_timeline_cpu_and_memcached_delay_sustainedreq"): lambda: PerformancePr
             ),
             bottleneck_service="user-timeline-service",
         ),
-pid("post_storage_cpu_and_home_redis_delay_sustainedreq"): lambda: PerformanceProblem(
-            problem_id=pid("post_storage_cpu_and_home_redis_delay_sustainedreq"),
-            suite=suite,
-            faults=[
-                FaultSpec("cpu", "post-storage-service", cpu_workers=22),
-                FaultSpec(
-                    "delay",
-                    "home-timeline-service",
-                    peer_service="home-timeline-redis",
-                    delay_ms=50,
-                    jitter_ms=1,
-                    ingress_port=6379,
-                ),
-            ],
-            workload=wl.sustained(
-                wl.READ_HOME_TIMELINE, rate=1000, connections=100, threads=100, duration=60
-            ),
-            task=ResourceDiagnosis(
-                endpoint=wl.READ_HOME_TIMELINE["endpoint"], baseline_p95_ms=11
-            ),
-            bottleneck_service="post-storage-service",
-        ),
-pid("post_storage_cpu_and_user_redis_delay_sustainedreq"): lambda: PerformanceProblem(
-            problem_id=pid("post_storage_cpu_and_user_redis_delay_sustainedreq"),
-            suite=suite,
-            faults=[
-                FaultSpec("cpu", "post-storage-service", cpu_workers=22),
-                FaultSpec(
-                    "delay",
-                    "user-timeline-service",
-                    peer_service="user-timeline-redis",
-                    delay_ms=50,
-                    jitter_ms=1,
-                    ingress_port=6379,
-                ),
-            ],
-            workload=wl.sustained(
-                wl.READ_USER_TIMELINE, rate=1000, connections=100, threads=100, duration=60
-            ),
-            task=ResourceDiagnosis(
-                endpoint=wl.READ_USER_TIMELINE["endpoint"], baseline_p95_ms=5
-            ),
-            bottleneck_service="post-storage-service",
-        ),
 pid("home_timeline_cpu_with_user_timeline_decoy_sustainedreq"): lambda: PerformanceProblem(
             problem_id=pid("home_timeline_cpu_with_user_timeline_decoy_sustainedreq"),
             suite=suite,
@@ -711,6 +657,201 @@ pid("home_cpu_and_frontend_delay_with_user_decoy_sustainedreq"): lambda: Perform
                 endpoint=wl.READ_HOME_TIMELINE["endpoint"], baseline_p95_ms=11
             ),
             bottleneck_service="home-timeline-service",
+        ),
+        # Multi-fault + off-path decoy (no span drops). Graded cpu+network on the
+        # loaded path; decoy on the unused timeline / frontend edge.
+        pid("user_cpu_and_frontend_delay_with_home_decoy_sustainedreq"): lambda: PerformanceProblem(
+            problem_id=pid("user_cpu_and_frontend_delay_with_home_decoy_sustainedreq"),
+            suite=suite,
+            faults=[
+                FaultSpec("cpu", "user-timeline-service", cpu_workers=30),
+                FaultSpec(
+                    "delay",
+                    "frontend",
+                    peer_service="user-timeline-service",
+                    delay_ms=50,
+                    jitter_ms=1,
+                    ingress_port=9090,
+                ),
+                FaultSpec(
+                    "cpu", "home-timeline-service", cpu_workers=30, decoy=True
+                ),
+            ],
+            workload=wl.sustained(
+                wl.READ_USER_TIMELINE, rate=1000, connections=100, threads=100, duration=60
+            ),
+            task=ResourceDiagnosis(
+                endpoint=wl.READ_USER_TIMELINE["endpoint"], baseline_p95_ms=5
+            ),
+            bottleneck_service="user-timeline-service",
+        ),
+        pid("home_cpu_and_post_storage_delay_with_user_decoy_sustainedreq"): lambda: PerformanceProblem(
+            problem_id=pid(
+                "home_cpu_and_post_storage_delay_with_user_decoy_sustainedreq"
+            ),
+            suite=suite,
+            faults=[
+                FaultSpec("cpu", "home-timeline-service", cpu_workers=30),
+                FaultSpec(
+                    "delay",
+                    "home-timeline-service",
+                    peer_service="post-storage-service",
+                    delay_ms=50,
+                    jitter_ms=1,
+                    ingress_port=9090,
+                ),
+                FaultSpec(
+                    "cpu", "user-timeline-service", cpu_workers=30, decoy=True
+                ),
+            ],
+            workload=wl.sustained(
+                wl.READ_HOME_TIMELINE, rate=1000, connections=100, threads=100, duration=60
+            ),
+            task=ResourceDiagnosis(
+                endpoint=wl.READ_HOME_TIMELINE["endpoint"], baseline_p95_ms=11
+            ),
+            bottleneck_service="home-timeline-service",
+        ),
+        pid("user_cpu_and_post_storage_delay_with_home_decoy_sustainedreq"): lambda: PerformanceProblem(
+            problem_id=pid(
+                "user_cpu_and_post_storage_delay_with_home_decoy_sustainedreq"
+            ),
+            suite=suite,
+            faults=[
+                FaultSpec("cpu", "user-timeline-service", cpu_workers=30),
+                FaultSpec(
+                    "delay",
+                    "user-timeline-service",
+                    peer_service="post-storage-service",
+                    delay_ms=50,
+                    jitter_ms=1,
+                    ingress_port=9090,
+                ),
+                FaultSpec(
+                    "cpu", "home-timeline-service", cpu_workers=30, decoy=True
+                ),
+            ],
+            workload=wl.sustained(
+                wl.READ_USER_TIMELINE, rate=1000, connections=100, threads=100, duration=60
+            ),
+            task=ResourceDiagnosis(
+                endpoint=wl.READ_USER_TIMELINE["endpoint"], baseline_p95_ms=5
+            ),
+            bottleneck_service="user-timeline-service",
+        ),
+        pid("frontend_cpu_and_home_post_storage_delay_with_user_decoy_sustainedreq"): lambda: PerformanceProblem(
+            problem_id=pid(
+                "frontend_cpu_and_home_post_storage_delay_with_user_decoy_sustainedreq"
+            ),
+            suite=suite,
+            faults=[
+                FaultSpec("cpu", "frontend", cpu_workers=32),
+                FaultSpec(
+                    "delay",
+                    "home-timeline-service",
+                    peer_service="post-storage-service",
+                    delay_ms=50,
+                    jitter_ms=1,
+                    ingress_port=9090,
+                ),
+                FaultSpec(
+                    "cpu", "user-timeline-service", cpu_workers=30, decoy=True
+                ),
+            ],
+            workload=wl.sustained(
+                wl.READ_HOME_TIMELINE, rate=1000, connections=100, threads=100, duration=60
+            ),
+            task=ResourceDiagnosis(
+                endpoint=wl.READ_HOME_TIMELINE["endpoint"], baseline_p95_ms=11
+            ),
+            bottleneck_service="frontend-service",
+        ),
+        pid("frontend_cpu_and_user_post_storage_delay_with_home_decoy_sustainedreq"): lambda: PerformanceProblem(
+            problem_id=pid(
+                "frontend_cpu_and_user_post_storage_delay_with_home_decoy_sustainedreq"
+            ),
+            suite=suite,
+            faults=[
+                FaultSpec("cpu", "frontend", cpu_workers=32),
+                FaultSpec(
+                    "delay",
+                    "user-timeline-service",
+                    peer_service="post-storage-service",
+                    delay_ms=50,
+                    jitter_ms=1,
+                    ingress_port=9090,
+                ),
+                FaultSpec(
+                    "cpu", "home-timeline-service", cpu_workers=30, decoy=True
+                ),
+            ],
+            workload=wl.sustained(
+                wl.READ_USER_TIMELINE, rate=1000, connections=100, threads=100, duration=60
+            ),
+            task=ResourceDiagnosis(
+                endpoint=wl.READ_USER_TIMELINE["endpoint"], baseline_p95_ms=5
+            ),
+            bottleneck_service="frontend-service",
+        ),
+        pid("home_cpu_and_memcached_delay_with_user_decoy_sustainedreq"): lambda: PerformanceProblem(
+            problem_id=pid(
+                "home_cpu_and_memcached_delay_with_user_decoy_sustainedreq"
+            ),
+            suite=suite,
+            faults=[
+                FaultSpec("cpu", "home-timeline-service", cpu_workers=30),
+                FaultSpec(
+                    "delay",
+                    "post-storage-service",
+                    peer_service="post-storage-memcached",
+                    delay_ms=50,
+                    jitter_ms=1,
+                    ingress_port=11211,
+                ),
+                FaultSpec(
+                    "cpu", "user-timeline-service", cpu_workers=30, decoy=True
+                ),
+            ],
+            workload=wl.sustained(
+                wl.READ_HOME_TIMELINE, rate=1000, connections=100, threads=100, duration=60
+            ),
+            task=ResourceDiagnosis(
+                endpoint=wl.READ_HOME_TIMELINE["endpoint"], baseline_p95_ms=11
+            ),
+            bottleneck_service="home-timeline-service",
+        ),
+        pid("user_cpu_and_memcached_delay_with_home_frontend_decoy_sustainedreq"): lambda: PerformanceProblem(
+            problem_id=pid(
+                "user_cpu_and_memcached_delay_with_home_frontend_decoy_sustainedreq"
+            ),
+            suite=suite,
+            faults=[
+                FaultSpec("cpu", "user-timeline-service", cpu_workers=30),
+                FaultSpec(
+                    "delay",
+                    "post-storage-service",
+                    peer_service="post-storage-memcached",
+                    delay_ms=50,
+                    jitter_ms=1,
+                    ingress_port=11211,
+                ),
+                FaultSpec(
+                    "delay",
+                    "frontend",
+                    peer_service="home-timeline-service",
+                    delay_ms=50,
+                    jitter_ms=1,
+                    ingress_port=9090,
+                    decoy=True,
+                ),
+            ],
+            workload=wl.sustained(
+                wl.READ_USER_TIMELINE, rate=1000, connections=100, threads=100, duration=60
+            ),
+            task=ResourceDiagnosis(
+                endpoint=wl.READ_USER_TIMELINE["endpoint"], baseline_p95_ms=5
+            ),
+            bottleneck_service="user-timeline-service",
         ),
         # Mixed home+user timeline workload with graded faults on both request paths.
         pid("home_and_user_timeline_cpu_sustainedreq"): lambda: PerformanceProblem(
@@ -1247,6 +1388,117 @@ pid("user_timeline_to_post_storage_delay_singlereq_drop_server"): lambda: Perfor
                 operations=["read_user_timeline_server"],
             ),
         ),
+# Single-fault + sustained load with incomplete telemetry (service-level drops).
+# Faulty service @ 0.5; other path services @ 0.3. Covers CPU and delay across
+# home/user paths and cache/storage edges.
+pid("home_timeline_cpu_sustainedreq_svc_drop"): lambda: PerformanceProblem(
+            problem_id=pid("home_timeline_cpu_sustainedreq_svc_drop"),
+            suite=suite,
+            fault=FaultSpec("cpu", "home-timeline-service", cpu_workers=30),
+            workload=wl.sustained(
+                wl.READ_HOME_TIMELINE, rate=1000, connections=100, threads=100, duration=60
+            ),
+            task=ResourceDiagnosis(
+                endpoint=wl.READ_HOME_TIMELINE["endpoint"], baseline_p95_ms=7
+            ),
+            bottleneck_service="home-timeline-service",
+            jaeger_proxy=JaegerProxySpec(
+                services=_svc_drop(("home-timeline-service",), _HOME_PATH_SVCS),
+            ),
+        ),
+pid("user_timeline_cpu_sustainedreq_svc_drop"): lambda: PerformanceProblem(
+            problem_id=pid("user_timeline_cpu_sustainedreq_svc_drop"),
+            suite=suite,
+            fault=FaultSpec("cpu", "user-timeline-service", cpu_workers=30),
+            workload=wl.sustained(
+                wl.READ_USER_TIMELINE, rate=1000, connections=100, threads=100, duration=60
+            ),
+            task=ResourceDiagnosis(
+                endpoint=wl.READ_USER_TIMELINE["endpoint"], baseline_p95_ms=5
+            ),
+            bottleneck_service="user-timeline-service",
+            jaeger_proxy=JaegerProxySpec(
+                services=_svc_drop(("user-timeline-service",), _USER_PATH_SVCS),
+            ),
+        ),
+pid("frontend_to_home_timeline_delay_sustainedreq_svc_drop"): lambda: PerformanceProblem(
+            problem_id=pid("frontend_to_home_timeline_delay_sustainedreq_svc_drop"),
+            suite=suite,
+            fault=FaultSpec(
+                "delay",
+                "frontend",
+                peer_service="home-timeline-service",
+                delay_ms=20,
+                jitter_ms=5,
+                ingress_port=9090,
+            ),
+            workload=wl.sustained(
+                wl.READ_HOME_TIMELINE, rate=1000, connections=100, threads=100, duration=60
+            ),
+            task=ResourceDiagnosis(
+                endpoint=wl.READ_HOME_TIMELINE["endpoint"], baseline_p95_ms=11
+            ),
+            bottleneck_service="home-timeline-service",
+            bottleneck_aliases=["frontend-service"],
+            network_from_service="frontend-service",
+            network_to_service="home-timeline-service",
+            network_from_aliases=["frontend"],
+            jaeger_proxy=JaegerProxySpec(
+                services=_svc_drop(
+                    ("frontend-service", "home-timeline-service"),
+                    _HOME_PATH_SVCS,
+                ),
+            ),
+        ),
+pid("post_storage_to_memcached_delay_sustainedreq_svc_drop"): lambda: PerformanceProblem(
+            problem_id=pid("post_storage_to_memcached_delay_sustainedreq_svc_drop"),
+            suite=suite,
+            fault=FaultSpec(
+                "delay",
+                "post-storage-service",
+                peer_service="post-storage-memcached",
+                delay_ms=5,
+                jitter_ms=1,
+                ingress_port=11211,
+            ),
+            workload=wl.sustained(
+                wl.READ_HOME_TIMELINE, rate=1000, connections=100, threads=100, duration=60
+            ),
+            task=ResourceDiagnosis(
+                endpoint=wl.READ_HOME_TIMELINE["endpoint"], baseline_p95_ms=11
+            ),
+            bottleneck_service="post-storage-service",
+            network_from_service="post-storage-service",
+            network_to_service="post-storage-memcached",
+            jaeger_proxy=JaegerProxySpec(
+                services=_svc_drop(("post-storage-service",), _HOME_PATH_SVCS),
+            ),
+        ),
+pid("user_timeline_to_redis_delay_sustainedreq_svc_drop"): lambda: PerformanceProblem(
+            problem_id=pid("user_timeline_to_redis_delay_sustainedreq_svc_drop"),
+            suite=suite,
+            fault=FaultSpec(
+                "delay",
+                "user-timeline-service",
+                peer_service="user-timeline-redis",
+                delay_ms=20,
+                jitter_ms=1,
+                ingress_port=6379,
+            ),
+            workload=wl.sustained(
+                wl.READ_USER_TIMELINE, rate=1000, connections=100, threads=100, duration=60
+            ),
+            task=ResourceDiagnosis(
+                endpoint=wl.READ_USER_TIMELINE["endpoint"], baseline_p95_ms=5
+            ),
+            bottleneck_service="user-timeline-redis",
+            bottleneck_aliases=["user-timeline-service"],
+            network_from_service="user-timeline-service",
+            network_to_service="user-timeline-redis",
+            jaeger_proxy=JaegerProxySpec(
+                services=_svc_drop(("user-timeline-service",), _USER_PATH_SVCS),
+            ),
+        ),
 # CPU + network-delay multi-faults on home/user paths, with incomplete telemetry:
 # spans from faulty services dropped at 0.5; other path services at 0.3.
 pid("home_timeline_cpu_and_frontend_delay_sustainedreq_svc_drop"): lambda: PerformanceProblem(
@@ -1353,6 +1605,666 @@ pid("user_timeline_cpu_and_post_storage_delay_sustainedreq_svc_drop"): lambda: P
                     delay_ms=50,
                     jitter_ms=1,
                     ingress_port=9090,
+                ),
+            ],
+            workload=wl.sustained(
+                wl.READ_USER_TIMELINE, rate=1000, connections=100, threads=100, duration=60
+            ),
+            task=ResourceDiagnosis(
+                endpoint=wl.READ_USER_TIMELINE["endpoint"], baseline_p95_ms=5
+            ),
+            bottleneck_service="user-timeline-service",
+            jaeger_proxy=JaegerProxySpec(
+                services=_svc_drop(
+                    ("user-timeline-service", "post-storage-service"),
+                    _USER_PATH_SVCS,
+                ),
+            ),
+        ),
+# More multi-fault + real + svc_drop (sustained): memcached/redis/frontend CPU edges.
+pid("frontend_cpu_and_home_post_storage_delay_sustainedreq_svc_drop"): lambda: PerformanceProblem(
+            problem_id=pid(
+                "frontend_cpu_and_home_post_storage_delay_sustainedreq_svc_drop"
+            ),
+            suite=suite,
+            faults=[
+                FaultSpec("cpu", "frontend", cpu_workers=32),
+                FaultSpec(
+                    "delay",
+                    "home-timeline-service",
+                    peer_service="post-storage-service",
+                    delay_ms=50,
+                    jitter_ms=1,
+                    ingress_port=9090,
+                ),
+            ],
+            workload=wl.sustained(
+                wl.READ_HOME_TIMELINE, rate=1000, connections=100, threads=100, duration=60
+            ),
+            task=ResourceDiagnosis(
+                endpoint=wl.READ_HOME_TIMELINE["endpoint"], baseline_p95_ms=11
+            ),
+            bottleneck_service="frontend-service",
+            jaeger_proxy=JaegerProxySpec(
+                services=_svc_drop(
+                    ("frontend-service", "home-timeline-service", "post-storage-service"),
+                    _HOME_PATH_SVCS,
+                ),
+            ),
+        ),
+pid("frontend_cpu_and_user_post_storage_delay_sustainedreq_svc_drop"): lambda: PerformanceProblem(
+            problem_id=pid(
+                "frontend_cpu_and_user_post_storage_delay_sustainedreq_svc_drop"
+            ),
+            suite=suite,
+            faults=[
+                FaultSpec("cpu", "frontend", cpu_workers=32),
+                FaultSpec(
+                    "delay",
+                    "user-timeline-service",
+                    peer_service="post-storage-service",
+                    delay_ms=50,
+                    jitter_ms=1,
+                    ingress_port=9090,
+                ),
+            ],
+            workload=wl.sustained(
+                wl.READ_USER_TIMELINE, rate=1000, connections=100, threads=100, duration=60
+            ),
+            task=ResourceDiagnosis(
+                endpoint=wl.READ_USER_TIMELINE["endpoint"], baseline_p95_ms=5
+            ),
+            bottleneck_service="frontend-service",
+            jaeger_proxy=JaegerProxySpec(
+                services=_svc_drop(
+                    ("frontend-service", "user-timeline-service", "post-storage-service"),
+                    _USER_PATH_SVCS,
+                ),
+            ),
+        ),
+pid("home_timeline_cpu_and_memcached_delay_sustainedreq_svc_drop"): lambda: PerformanceProblem(
+            problem_id=pid(
+                "home_timeline_cpu_and_memcached_delay_sustainedreq_svc_drop"
+            ),
+            suite=suite,
+            faults=[
+                FaultSpec("cpu", "home-timeline-service", cpu_workers=30),
+                FaultSpec(
+                    "delay",
+                    "post-storage-service",
+                    peer_service="post-storage-memcached",
+                    delay_ms=50,
+                    jitter_ms=1,
+                    ingress_port=11211,
+                ),
+            ],
+            workload=wl.sustained(
+                wl.READ_HOME_TIMELINE, rate=1000, connections=100, threads=100, duration=60
+            ),
+            task=ResourceDiagnosis(
+                endpoint=wl.READ_HOME_TIMELINE["endpoint"], baseline_p95_ms=11
+            ),
+            bottleneck_service="home-timeline-service",
+            jaeger_proxy=JaegerProxySpec(
+                services=_svc_drop(
+                    ("home-timeline-service", "post-storage-service"),
+                    _HOME_PATH_SVCS,
+                ),
+            ),
+        ),
+pid("user_timeline_cpu_and_memcached_delay_sustainedreq_svc_drop"): lambda: PerformanceProblem(
+            problem_id=pid(
+                "user_timeline_cpu_and_memcached_delay_sustainedreq_svc_drop"
+            ),
+            suite=suite,
+            faults=[
+                FaultSpec("cpu", "user-timeline-service", cpu_workers=30),
+                FaultSpec(
+                    "delay",
+                    "post-storage-service",
+                    peer_service="post-storage-memcached",
+                    delay_ms=50,
+                    jitter_ms=1,
+                    ingress_port=11211,
+                ),
+            ],
+            workload=wl.sustained(
+                wl.READ_USER_TIMELINE, rate=1000, connections=100, threads=100, duration=60
+            ),
+            task=ResourceDiagnosis(
+                endpoint=wl.READ_USER_TIMELINE["endpoint"], baseline_p95_ms=5
+            ),
+            bottleneck_service="user-timeline-service",
+            jaeger_proxy=JaegerProxySpec(
+                services=_svc_drop(
+                    ("user-timeline-service", "post-storage-service"),
+                    _USER_PATH_SVCS,
+                ),
+            ),
+        ),
+# Single-fault + off-path decoy + svc_drop (sustained).
+pid("home_timeline_cpu_with_user_decoy_sustainedreq_svc_drop"): lambda: PerformanceProblem(
+            problem_id=pid("home_timeline_cpu_with_user_decoy_sustainedreq_svc_drop"),
+            suite=suite,
+            faults=[
+                FaultSpec("cpu", "home-timeline-service", cpu_workers=30),
+                FaultSpec(
+                    "cpu", "user-timeline-service", cpu_workers=30, decoy=True
+                ),
+            ],
+            workload=wl.sustained(
+                wl.READ_HOME_TIMELINE, rate=1000, connections=100, threads=100, duration=60
+            ),
+            task=ResourceDiagnosis(
+                endpoint=wl.READ_HOME_TIMELINE["endpoint"], baseline_p95_ms=11
+            ),
+            bottleneck_service="home-timeline-service",
+            jaeger_proxy=JaegerProxySpec(
+                services=_svc_drop(("home-timeline-service",), _HOME_PATH_SVCS),
+            ),
+        ),
+pid("user_timeline_cpu_with_home_decoy_sustainedreq_svc_drop"): lambda: PerformanceProblem(
+            problem_id=pid("user_timeline_cpu_with_home_decoy_sustainedreq_svc_drop"),
+            suite=suite,
+            faults=[
+                FaultSpec("cpu", "user-timeline-service", cpu_workers=30),
+                FaultSpec(
+                    "cpu", "home-timeline-service", cpu_workers=30, decoy=True
+                ),
+            ],
+            workload=wl.sustained(
+                wl.READ_USER_TIMELINE, rate=1000, connections=100, threads=100, duration=60
+            ),
+            task=ResourceDiagnosis(
+                endpoint=wl.READ_USER_TIMELINE["endpoint"], baseline_p95_ms=5
+            ),
+            bottleneck_service="user-timeline-service",
+            jaeger_proxy=JaegerProxySpec(
+                services=_svc_drop(("user-timeline-service",), _USER_PATH_SVCS),
+            ),
+        ),
+pid("home_frontend_delay_with_user_decoy_sustainedreq_svc_drop"): lambda: PerformanceProblem(
+            problem_id=pid("home_frontend_delay_with_user_decoy_sustainedreq_svc_drop"),
+            suite=suite,
+            faults=[
+                FaultSpec(
+                    "delay",
+                    "frontend",
+                    peer_service="home-timeline-service",
+                    delay_ms=50,
+                    jitter_ms=1,
+                    ingress_port=9090,
+                ),
+                FaultSpec(
+                    "cpu", "user-timeline-service", cpu_workers=30, decoy=True
+                ),
+            ],
+            workload=wl.sustained(
+                wl.READ_HOME_TIMELINE, rate=1000, connections=100, threads=100, duration=60
+            ),
+            task=ResourceDiagnosis(
+                endpoint=wl.READ_HOME_TIMELINE["endpoint"], baseline_p95_ms=11
+            ),
+            bottleneck_service="home-timeline-service",
+            network_from_service="frontend-service",
+            network_to_service="home-timeline-service",
+            network_from_aliases=["frontend"],
+            jaeger_proxy=JaegerProxySpec(
+                services=_svc_drop(
+                    ("frontend-service", "home-timeline-service"),
+                    _HOME_PATH_SVCS,
+                ),
+            ),
+        ),
+pid("user_frontend_delay_with_home_decoy_sustainedreq_svc_drop"): lambda: PerformanceProblem(
+            problem_id=pid("user_frontend_delay_with_home_decoy_sustainedreq_svc_drop"),
+            suite=suite,
+            faults=[
+                FaultSpec(
+                    "delay",
+                    "frontend",
+                    peer_service="user-timeline-service",
+                    delay_ms=50,
+                    jitter_ms=1,
+                    ingress_port=9090,
+                ),
+                FaultSpec(
+                    "cpu", "home-timeline-service", cpu_workers=30, decoy=True
+                ),
+            ],
+            workload=wl.sustained(
+                wl.READ_USER_TIMELINE, rate=1000, connections=100, threads=100, duration=60
+            ),
+            task=ResourceDiagnosis(
+                endpoint=wl.READ_USER_TIMELINE["endpoint"], baseline_p95_ms=5
+            ),
+            bottleneck_service="user-timeline-service",
+            network_from_service="frontend-service",
+            network_to_service="user-timeline-service",
+            network_from_aliases=["frontend"],
+            jaeger_proxy=JaegerProxySpec(
+                services=_svc_drop(
+                    ("frontend-service", "user-timeline-service"),
+                    _USER_PATH_SVCS,
+                ),
+            ),
+        ),
+pid("home_post_storage_delay_with_user_decoy_sustainedreq_svc_drop"): lambda: PerformanceProblem(
+            problem_id=pid(
+                "home_post_storage_delay_with_user_decoy_sustainedreq_svc_drop"
+            ),
+            suite=suite,
+            faults=[
+                FaultSpec(
+                    "delay",
+                    "home-timeline-service",
+                    peer_service="post-storage-service",
+                    delay_ms=50,
+                    jitter_ms=1,
+                    ingress_port=9090,
+                ),
+                FaultSpec(
+                    "cpu", "user-timeline-service", cpu_workers=30, decoy=True
+                ),
+            ],
+            workload=wl.sustained(
+                wl.READ_HOME_TIMELINE, rate=1000, connections=100, threads=100, duration=60
+            ),
+            task=ResourceDiagnosis(
+                endpoint=wl.READ_HOME_TIMELINE["endpoint"], baseline_p95_ms=11
+            ),
+            bottleneck_service="post-storage-service",
+            bottleneck_aliases=["home-timeline-service"],
+            network_from_service="home-timeline-service",
+            network_to_service="post-storage-service",
+            jaeger_proxy=JaegerProxySpec(
+                services=_svc_drop(
+                    ("home-timeline-service", "post-storage-service"),
+                    _HOME_PATH_SVCS,
+                ),
+            ),
+        ),
+pid("user_post_storage_delay_with_home_decoy_sustainedreq_svc_drop"): lambda: PerformanceProblem(
+            problem_id=pid(
+                "user_post_storage_delay_with_home_decoy_sustainedreq_svc_drop"
+            ),
+            suite=suite,
+            faults=[
+                FaultSpec(
+                    "delay",
+                    "user-timeline-service",
+                    peer_service="post-storage-service",
+                    delay_ms=50,
+                    jitter_ms=1,
+                    ingress_port=9090,
+                ),
+                FaultSpec(
+                    "cpu", "home-timeline-service", cpu_workers=30, decoy=True
+                ),
+            ],
+            workload=wl.sustained(
+                wl.READ_USER_TIMELINE, rate=1000, connections=100, threads=100, duration=60
+            ),
+            task=ResourceDiagnosis(
+                endpoint=wl.READ_USER_TIMELINE["endpoint"], baseline_p95_ms=5
+            ),
+            bottleneck_service="post-storage-service",
+            bottleneck_aliases=["user-timeline-service"],
+            network_from_service="user-timeline-service",
+            network_to_service="post-storage-service",
+            jaeger_proxy=JaegerProxySpec(
+                services=_svc_drop(
+                    ("user-timeline-service", "post-storage-service"),
+                    _USER_PATH_SVCS,
+                ),
+            ),
+        ),
+pid("home_redis_delay_with_user_decoy_sustainedreq_svc_drop"): lambda: PerformanceProblem(
+            problem_id=pid("home_redis_delay_with_user_decoy_sustainedreq_svc_drop"),
+            suite=suite,
+            faults=[
+                FaultSpec(
+                    "delay",
+                    "home-timeline-service",
+                    peer_service="home-timeline-redis",
+                    delay_ms=50,
+                    jitter_ms=1,
+                    ingress_port=6379,
+                ),
+                FaultSpec(
+                    "cpu", "user-timeline-service", cpu_workers=30, decoy=True
+                ),
+            ],
+            workload=wl.sustained(
+                wl.READ_HOME_TIMELINE, rate=1000, connections=100, threads=100, duration=60
+            ),
+            task=ResourceDiagnosis(
+                endpoint=wl.READ_HOME_TIMELINE["endpoint"], baseline_p95_ms=11
+            ),
+            bottleneck_service="home-timeline-redis",
+            bottleneck_aliases=["home-timeline-service"],
+            network_from_service="home-timeline-service",
+            network_to_service="home-timeline-redis",
+            jaeger_proxy=JaegerProxySpec(
+                services=_svc_drop(("home-timeline-service",), _HOME_PATH_SVCS),
+            ),
+        ),
+pid("user_redis_delay_with_home_decoy_sustainedreq_svc_drop"): lambda: PerformanceProblem(
+            problem_id=pid("user_redis_delay_with_home_decoy_sustainedreq_svc_drop"),
+            suite=suite,
+            faults=[
+                FaultSpec(
+                    "delay",
+                    "user-timeline-service",
+                    peer_service="user-timeline-redis",
+                    delay_ms=50,
+                    jitter_ms=1,
+                    ingress_port=6379,
+                ),
+                FaultSpec(
+                    "cpu", "home-timeline-service", cpu_workers=30, decoy=True
+                ),
+            ],
+            workload=wl.sustained(
+                wl.READ_USER_TIMELINE, rate=1000, connections=100, threads=100, duration=60
+            ),
+            task=ResourceDiagnosis(
+                endpoint=wl.READ_USER_TIMELINE["endpoint"], baseline_p95_ms=5
+            ),
+            bottleneck_service="user-timeline-redis",
+            bottleneck_aliases=["user-timeline-service"],
+            network_from_service="user-timeline-service",
+            network_to_service="user-timeline-redis",
+            jaeger_proxy=JaegerProxySpec(
+                services=_svc_drop(("user-timeline-service",), _USER_PATH_SVCS),
+            ),
+        ),
+pid("memcached_delay_home_path_with_user_decoy_sustainedreq_svc_drop"): lambda: PerformanceProblem(
+            problem_id=pid(
+                "memcached_delay_home_path_with_user_decoy_sustainedreq_svc_drop"
+            ),
+            suite=suite,
+            faults=[
+                FaultSpec(
+                    "delay",
+                    "post-storage-service",
+                    peer_service="post-storage-memcached",
+                    delay_ms=50,
+                    jitter_ms=1,
+                    ingress_port=11211,
+                ),
+                FaultSpec(
+                    "cpu", "user-timeline-service", cpu_workers=30, decoy=True
+                ),
+            ],
+            workload=wl.sustained(
+                wl.READ_HOME_TIMELINE, rate=1000, connections=100, threads=100, duration=60
+            ),
+            task=ResourceDiagnosis(
+                endpoint=wl.READ_HOME_TIMELINE["endpoint"], baseline_p95_ms=11
+            ),
+            bottleneck_service="post-storage-service",
+            network_from_service="post-storage-service",
+            network_to_service="post-storage-memcached",
+            jaeger_proxy=JaegerProxySpec(
+                services=_svc_drop(("post-storage-service",), _HOME_PATH_SVCS),
+            ),
+        ),
+# Multi-fault + off-path decoy + svc_drop (sustained).
+pid("home_cpu_and_frontend_delay_with_user_decoy_sustainedreq_svc_drop"): lambda: PerformanceProblem(
+            problem_id=pid(
+                "home_cpu_and_frontend_delay_with_user_decoy_sustainedreq_svc_drop"
+            ),
+            suite=suite,
+            faults=[
+                FaultSpec("cpu", "home-timeline-service", cpu_workers=30),
+                FaultSpec(
+                    "delay",
+                    "frontend",
+                    peer_service="home-timeline-service",
+                    delay_ms=50,
+                    jitter_ms=1,
+                    ingress_port=9090,
+                ),
+                FaultSpec(
+                    "cpu", "user-timeline-service", cpu_workers=30, decoy=True
+                ),
+            ],
+            workload=wl.sustained(
+                wl.READ_HOME_TIMELINE, rate=1000, connections=100, threads=100, duration=60
+            ),
+            task=ResourceDiagnosis(
+                endpoint=wl.READ_HOME_TIMELINE["endpoint"], baseline_p95_ms=11
+            ),
+            bottleneck_service="home-timeline-service",
+            jaeger_proxy=JaegerProxySpec(
+                services=_svc_drop(
+                    ("frontend-service", "home-timeline-service"),
+                    _HOME_PATH_SVCS,
+                ),
+            ),
+        ),
+pid("user_cpu_and_frontend_delay_with_home_decoy_sustainedreq_svc_drop"): lambda: PerformanceProblem(
+            problem_id=pid(
+                "user_cpu_and_frontend_delay_with_home_decoy_sustainedreq_svc_drop"
+            ),
+            suite=suite,
+            faults=[
+                FaultSpec("cpu", "user-timeline-service", cpu_workers=30),
+                FaultSpec(
+                    "delay",
+                    "frontend",
+                    peer_service="user-timeline-service",
+                    delay_ms=50,
+                    jitter_ms=1,
+                    ingress_port=9090,
+                ),
+                FaultSpec(
+                    "cpu", "home-timeline-service", cpu_workers=30, decoy=True
+                ),
+            ],
+            workload=wl.sustained(
+                wl.READ_USER_TIMELINE, rate=1000, connections=100, threads=100, duration=60
+            ),
+            task=ResourceDiagnosis(
+                endpoint=wl.READ_USER_TIMELINE["endpoint"], baseline_p95_ms=5
+            ),
+            bottleneck_service="user-timeline-service",
+            jaeger_proxy=JaegerProxySpec(
+                services=_svc_drop(
+                    ("frontend-service", "user-timeline-service"),
+                    _USER_PATH_SVCS,
+                ),
+            ),
+        ),
+pid("home_cpu_and_post_storage_delay_with_user_decoy_sustainedreq_svc_drop"): lambda: PerformanceProblem(
+            problem_id=pid(
+                "home_cpu_and_post_storage_delay_with_user_decoy_sustainedreq_svc_drop"
+            ),
+            suite=suite,
+            faults=[
+                FaultSpec("cpu", "home-timeline-service", cpu_workers=30),
+                FaultSpec(
+                    "delay",
+                    "home-timeline-service",
+                    peer_service="post-storage-service",
+                    delay_ms=50,
+                    jitter_ms=1,
+                    ingress_port=9090,
+                ),
+                FaultSpec(
+                    "cpu", "user-timeline-service", cpu_workers=30, decoy=True
+                ),
+            ],
+            workload=wl.sustained(
+                wl.READ_HOME_TIMELINE, rate=1000, connections=100, threads=100, duration=60
+            ),
+            task=ResourceDiagnosis(
+                endpoint=wl.READ_HOME_TIMELINE["endpoint"], baseline_p95_ms=11
+            ),
+            bottleneck_service="home-timeline-service",
+            jaeger_proxy=JaegerProxySpec(
+                services=_svc_drop(
+                    ("home-timeline-service", "post-storage-service"),
+                    _HOME_PATH_SVCS,
+                ),
+            ),
+        ),
+pid("user_cpu_and_post_storage_delay_with_home_decoy_sustainedreq_svc_drop"): lambda: PerformanceProblem(
+            problem_id=pid(
+                "user_cpu_and_post_storage_delay_with_home_decoy_sustainedreq_svc_drop"
+            ),
+            suite=suite,
+            faults=[
+                FaultSpec("cpu", "user-timeline-service", cpu_workers=30),
+                FaultSpec(
+                    "delay",
+                    "user-timeline-service",
+                    peer_service="post-storage-service",
+                    delay_ms=50,
+                    jitter_ms=1,
+                    ingress_port=9090,
+                ),
+                FaultSpec(
+                    "cpu", "home-timeline-service", cpu_workers=30, decoy=True
+                ),
+            ],
+            workload=wl.sustained(
+                wl.READ_USER_TIMELINE, rate=1000, connections=100, threads=100, duration=60
+            ),
+            task=ResourceDiagnosis(
+                endpoint=wl.READ_USER_TIMELINE["endpoint"], baseline_p95_ms=5
+            ),
+            bottleneck_service="user-timeline-service",
+            jaeger_proxy=JaegerProxySpec(
+                services=_svc_drop(
+                    ("user-timeline-service", "post-storage-service"),
+                    _USER_PATH_SVCS,
+                ),
+            ),
+        ),
+pid("frontend_cpu_and_home_post_storage_delay_with_user_decoy_sustainedreq_svc_drop"): lambda: PerformanceProblem(
+            problem_id=pid(
+                "frontend_cpu_and_home_post_storage_delay_with_user_decoy_sustainedreq_svc_drop"
+            ),
+            suite=suite,
+            faults=[
+                FaultSpec("cpu", "frontend", cpu_workers=32),
+                FaultSpec(
+                    "delay",
+                    "home-timeline-service",
+                    peer_service="post-storage-service",
+                    delay_ms=50,
+                    jitter_ms=1,
+                    ingress_port=9090,
+                ),
+                FaultSpec(
+                    "cpu", "user-timeline-service", cpu_workers=30, decoy=True
+                ),
+            ],
+            workload=wl.sustained(
+                wl.READ_HOME_TIMELINE, rate=1000, connections=100, threads=100, duration=60
+            ),
+            task=ResourceDiagnosis(
+                endpoint=wl.READ_HOME_TIMELINE["endpoint"], baseline_p95_ms=11
+            ),
+            bottleneck_service="frontend-service",
+            jaeger_proxy=JaegerProxySpec(
+                services=_svc_drop(
+                    ("frontend-service", "home-timeline-service", "post-storage-service"),
+                    _HOME_PATH_SVCS,
+                ),
+            ),
+        ),
+pid("frontend_cpu_and_user_post_storage_delay_with_home_decoy_sustainedreq_svc_drop"): lambda: PerformanceProblem(
+            problem_id=pid(
+                "frontend_cpu_and_user_post_storage_delay_with_home_decoy_sustainedreq_svc_drop"
+            ),
+            suite=suite,
+            faults=[
+                FaultSpec("cpu", "frontend", cpu_workers=32),
+                FaultSpec(
+                    "delay",
+                    "user-timeline-service",
+                    peer_service="post-storage-service",
+                    delay_ms=50,
+                    jitter_ms=1,
+                    ingress_port=9090,
+                ),
+                FaultSpec(
+                    "cpu", "home-timeline-service", cpu_workers=30, decoy=True
+                ),
+            ],
+            workload=wl.sustained(
+                wl.READ_USER_TIMELINE, rate=1000, connections=100, threads=100, duration=60
+            ),
+            task=ResourceDiagnosis(
+                endpoint=wl.READ_USER_TIMELINE["endpoint"], baseline_p95_ms=5
+            ),
+            bottleneck_service="frontend-service",
+            jaeger_proxy=JaegerProxySpec(
+                services=_svc_drop(
+                    ("frontend-service", "user-timeline-service", "post-storage-service"),
+                    _USER_PATH_SVCS,
+                ),
+            ),
+        ),
+pid("home_cpu_and_memcached_delay_with_user_decoy_sustainedreq_svc_drop"): lambda: PerformanceProblem(
+            problem_id=pid(
+                "home_cpu_and_memcached_delay_with_user_decoy_sustainedreq_svc_drop"
+            ),
+            suite=suite,
+            faults=[
+                FaultSpec("cpu", "home-timeline-service", cpu_workers=30),
+                FaultSpec(
+                    "delay",
+                    "post-storage-service",
+                    peer_service="post-storage-memcached",
+                    delay_ms=50,
+                    jitter_ms=1,
+                    ingress_port=11211,
+                ),
+                FaultSpec(
+                    "cpu", "user-timeline-service", cpu_workers=30, decoy=True
+                ),
+            ],
+            workload=wl.sustained(
+                wl.READ_HOME_TIMELINE, rate=1000, connections=100, threads=100, duration=60
+            ),
+            task=ResourceDiagnosis(
+                endpoint=wl.READ_HOME_TIMELINE["endpoint"], baseline_p95_ms=11
+            ),
+            bottleneck_service="home-timeline-service",
+            jaeger_proxy=JaegerProxySpec(
+                services=_svc_drop(
+                    ("home-timeline-service", "post-storage-service"),
+                    _HOME_PATH_SVCS,
+                ),
+            ),
+        ),
+pid("user_cpu_and_memcached_delay_with_home_frontend_decoy_sustainedreq_svc_drop"): lambda: PerformanceProblem(
+            problem_id=pid(
+                "user_cpu_and_memcached_delay_with_home_frontend_decoy_sustainedreq_svc_drop"
+            ),
+            suite=suite,
+            faults=[
+                FaultSpec("cpu", "user-timeline-service", cpu_workers=30),
+                FaultSpec(
+                    "delay",
+                    "post-storage-service",
+                    peer_service="post-storage-memcached",
+                    delay_ms=50,
+                    jitter_ms=1,
+                    ingress_port=11211,
+                ),
+                FaultSpec(
+                    "delay",
+                    "frontend",
+                    peer_service="home-timeline-service",
+                    delay_ms=50,
+                    jitter_ms=1,
+                    ingress_port=9090,
+                    decoy=True,
                 ),
             ],
             workload=wl.sustained(
